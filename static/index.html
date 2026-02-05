@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ReLIMS Print Service</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f5f5f5; color: #333; }
+    .container { max-width: 520px; margin: 40px auto; background: #fff; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,.1); padding: 32px; }
+    h1 { font-size: 20px; margin-bottom: 4px; }
+    .subtitle { color: #888; font-size: 13px; margin-bottom: 24px; }
+    .status { display: flex; align-items: center; gap: 8px; margin-bottom: 24px; padding: 10px 14px; border-radius: 6px; background: #f0fdf4; border: 1px solid #bbf7d0; font-size: 14px; }
+    .status.error { background: #fef2f2; border-color: #fecaca; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; background: #22c55e; flex-shrink: 0; }
+    .status.error .dot { background: #ef4444; }
+    label { display: block; font-weight: 600; font-size: 13px; margin-bottom: 6px; margin-top: 16px; }
+    select, input[type="text"], input[type="number"] { width: 100%; padding: 8px 12px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px; }
+    .radio-group { display: flex; gap: 16px; margin-top: 4px; }
+    .radio-group label { font-weight: 400; display: flex; align-items: center; gap: 6px; cursor: pointer; }
+    .section { border-top: 1px solid #e5e7eb; padding-top: 16px; margin-top: 20px; }
+    .btn { display: inline-block; padding: 10px 20px; border: none; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; margin-top: 16px; margin-right: 8px; }
+    .btn-primary { background: #2563eb; color: #fff; }
+    .btn-primary:hover { background: #1d4ed8; }
+    .btn-secondary { background: #e5e7eb; color: #333; }
+    .btn-secondary:hover { background: #d1d5db; }
+    .msg { margin-top: 12px; padding: 10px 14px; border-radius: 6px; font-size: 13px; display: none; }
+    .msg.ok { display: block; background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534; }
+    .msg.err { display: block; background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>ReLIMS Print Service</h1>
+    <p class="subtitle">ZPL Label Printer Bridge</p>
+
+    <div id="status" class="status"><span class="dot"></span><span id="statusText">Checking...</span></div>
+
+    <label>Printer Backend</label>
+    <div class="radio-group">
+      <label><input type="radio" name="backend" value="windows" checked> Windows (USB)</label>
+      <label><input type="radio" name="backend" value="network"> Network (TCP)</label>
+    </div>
+
+    <div id="winSection">
+      <label>Printer
+        <button type="button" class="btn-secondary" style="float:right;padding:2px 10px;margin:0;font-size:12px" onclick="loadPrinters()">Refresh</button>
+      </label>
+      <select id="printerName"><option value="">Loading...</option></select>
+    </div>
+
+    <div id="netSection" class="hidden">
+      <label>Printer Host</label>
+      <input type="text" id="printerHost" placeholder="192.168.1.100">
+      <label>Port</label>
+      <input type="number" id="printerPort" value="9100">
+    </div>
+
+    <div class="section">
+      <button class="btn btn-primary" onclick="saveConfig()">Save</button>
+      <button class="btn btn-secondary" onclick="testPrint()">Test Print</button>
+    </div>
+
+    <div id="msg" class="msg"></div>
+  </div>
+
+<script>
+const API = window.location.origin;
+
+function showMsg(text, ok) {
+  const el = document.getElementById("msg");
+  el.textContent = text;
+  el.className = "msg " + (ok ? "ok" : "err");
+  setTimeout(() => el.className = "msg", 5000);
+}
+
+async function loadStatus() {
+  try {
+    const r = await fetch(API + "/status");
+    const d = await r.json();
+    document.getElementById("statusText").textContent = "Running — v" + d.version + (d.win32 ? "" : " (network only)");
+  } catch {
+    const s = document.getElementById("status");
+    s.className = "status error";
+    document.getElementById("statusText").textContent = "Service not responding";
+  }
+}
+
+async function loadPrinters() {
+  try {
+    const r = await fetch(API + "/printers");
+    const d = await r.json();
+    const sel = document.getElementById("printerName");
+    sel.innerHTML = "";
+    if (d.printers.length === 0) {
+      sel.innerHTML = '<option value="">No printers found</option>';
+      return;
+    }
+    d.printers.forEach(p => {
+      const opt = document.createElement("option");
+      opt.value = p;
+      opt.textContent = p;
+      sel.appendChild(opt);
+    });
+  } catch { /* ignore */ }
+}
+
+async function loadConfig() {
+  try {
+    const r = await fetch(API + "/config");
+    const c = await r.json();
+    document.querySelector(`input[name="backend"][value="${c.backend}"]`).checked = true;
+    document.getElementById("printerHost").value = c.printer_host || "";
+    document.getElementById("printerPort").value = c.printer_port || 9100;
+    toggleBackend();
+    // Set printer dropdown after printers load
+    await loadPrinters();
+    if (c.printer_name) document.getElementById("printerName").value = c.printer_name;
+  } catch { /* ignore */ }
+}
+
+function toggleBackend() {
+  const isNet = document.querySelector('input[name="backend"]:checked').value === "network";
+  document.getElementById("winSection").className = isNet ? "hidden" : "";
+  document.getElementById("netSection").className = isNet ? "" : "hidden";
+}
+
+document.querySelectorAll('input[name="backend"]').forEach(r => r.addEventListener("change", toggleBackend));
+
+async function saveConfig() {
+  const backend = document.querySelector('input[name="backend"]:checked').value;
+  const body = { backend };
+  if (backend === "windows") {
+    body.printer_name = document.getElementById("printerName").value;
+  } else {
+    body.printer_host = document.getElementById("printerHost").value;
+    body.printer_port = parseInt(document.getElementById("printerPort").value) || 9100;
+  }
+  try {
+    const r = await fetch(API + "/config", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body) });
+    if (r.ok) showMsg("Configuration saved", true);
+    else showMsg("Failed to save", false);
+  } catch (e) { showMsg("Error: " + e.message, false); }
+}
+
+async function testPrint() {
+  const zpl = "^XA^FO50,50^A0N,40,40^FDReLIMS Test Print^FS^FO50,100^A0N,30,30^FD" + new Date().toLocaleString() + "^FS^XZ";
+  try {
+    const r = await fetch(API + "/print", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ zpl }) });
+    const d = await r.json();
+    if (d.success) showMsg("Test label sent to printer", true);
+    else showMsg("Print failed: " + d.error, false);
+  } catch (e) { showMsg("Error: " + e.message, false); }
+}
+
+loadStatus();
+loadConfig();
+</script>
+</body>
+</html>
