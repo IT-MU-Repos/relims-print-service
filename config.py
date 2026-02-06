@@ -3,11 +3,14 @@ import os
 import sys
 from pathlib import Path
 
+# Default backend based on platform
+_default_backend = "windows" if sys.platform == "win32" else "cups"
+
 DEFAULT_CONFIG = {
     "printer_name": "",
     "printer_host": "",
     "printer_port": 9100,
-    "backend": "windows",
+    "backend": _default_backend,
     "api_port": 5577,
     "timeout": 5,
 }

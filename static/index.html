@@ -39,11 +39,12 @@
 
     <label>Printer Backend</label>
     <div class="radio-group">
-      <label><input type="radio" name="backend" value="windows" checked> Windows (USB)</label>
+      <label><input type="radio" name="backend" value="windows"> Windows (USB)</label>
+      <label><input type="radio" name="backend" value="cups"> CUPS (Linux)</label>
       <label><input type="radio" name="backend" value="network"> Network (TCP)</label>
     </div>
 
-    <div id="winSection">
+    <div id="localSection">
       <label>Printer
         <button type="button" class="btn-secondary" style="float:right;padding:2px 10px;margin:0;font-size:12px" onclick="loadPrinters()">Refresh</button>
       </label>
@@ -79,7 +80,10 @@ async function loadStatus() {
   try {
     const r = await fetch(API + "/status");
     const d = await r.json();
-    document.getElementById("statusText").textContent = "Running — v" + d.version + (d.win32 ? "" : " (network only)");
+    let extra = "";
+    if (d.platform === "linux") extra = d.cups ? "" : " (network only)";
+    else extra = d.win32 ? "" : " (network only)";
+    document.getElementById("statusText").textContent = "Running — v" + d.version + " (" + (d.platform || "windows") + ")" + extra;
   } catch {
     const s = document.getElementById("status");
     s.className = "status error";
@@ -121,8 +125,9 @@ async function loadConfig() {
 }
 
 function toggleBackend() {
-  const isNet = document.querySelector('input[name="backend"]:checked').value === "network";
-  document.getElementById("winSection").className = isNet ? "hidden" : "";
+  const backend = document.querySelector('input[name="backend"]:checked').value;
+  const isNet = backend === "network";
+  document.getElementById("localSection").className = isNet ? "hidden" : "";
   document.getElementById("netSection").className = isNet ? "" : "hidden";
 }
 
@@ -131,7 +136,7 @@ document.querySelectorAll('input[name="backend"]').forEach(r => r.addEventListen
 async function saveConfig() {
   const backend = document.querySelector('input[name="backend"]:checked').value;
   const body = { backend };
-  if (backend === "windows") {
+  if (backend === "windows" || backend === "cups") {
     body.printer_name = document.getElementById("printerName").value;
   } else {
     body.printer_host = document.getElementById("printerHost").value;
