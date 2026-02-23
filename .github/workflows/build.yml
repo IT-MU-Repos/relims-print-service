@@ -1,4 +1,4 @@
-name: Build Print Service
+name: Build Print Manager
 
 on:
   push:
@@ -6,45 +6,139 @@ on:
       - "v*"
   workflow_dispatch:
 
+env:
+  PYTHON_VERSION: "3.11"
+
 jobs:
   build-windows:
-    name: Build .exe on Windows
+    name: Build Windows binaries
     runs-on: windows-latest
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Extract version from tag
+        id: version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_NAME" == v* ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+          else
+            echo "version=0.0.0-dev" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Patch version files
+        shell: python
+        run: |
+          import re
+          version = "${{ steps.version.outputs.version }}"
+          for path in ["service/version.py", "manager/version.py"]:
+              with open(path, "r") as f:
+                  content = f.read()
+              content = re.sub(r'VERSION = ".*?"', f'VERSION = "{version}"', content)
+              with open(path, "w") as f:
+                  f.write(content)
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install -r requirements-manager.txt
           pip install pyinstaller
 
-      - name: Build exe with PyInstaller
-        run: pyinstaller build/build.spec
+      - name: Build service exe
+        run: pyinstaller build/build_service.spec
 
-      - name: Upload exe as artifact
+      - name: Build manager exe
+        run: pyinstaller build/build_manager.spec
+
+      - name: Build self-updater exe
+        run: pyinstaller build/build_self_updater.spec
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: relims-print-service-windows
-          path: dist/relims-print-service.exe
+          name: windows-binaries
+          path: |
+            dist/relims-print-service.exe
+            dist/relims-print-manager.exe
+            dist/relims-self-updater.exe
+
+  build-windows-installer:
+    name: Build Windows installer
+    needs: build-windows
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_NAME" == v* ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+          else
+            echo "version=0.0.0-dev" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download Windows binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-binaries
+          path: dist/
+
+      - name: Build Inno Setup installer
+        uses: Minionguyjpro/Inno-Setup-Action@v1.2.4
+        with:
+          path: build/installer.iss
+          options: /DAppVersion=${{ steps.version.outputs.version }}
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: build/Output/relims-print-manager-setup.exe
 
   build-linux:
-    name: Build binary on Linux
+    name: Build Linux binaries
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Extract version from tag
+        id: version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_NAME" == v* ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+          else
+            echo "version=0.0.0-dev" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Patch version files
+        run: |
+          python3 -c "
+          import re
+          version = '${{ steps.version.outputs.version }}'
+          for path in ['service/version.py', 'manager/version.py']:
+              with open(path, 'r') as f:
+                  content = f.read()
+              content = re.sub(r'VERSION = \".*?\"', f'VERSION = \"{version}\"', content)
+              with open(path, 'w') as f:
+                  f.write(content)
+          "
 
       - name: Install system dependencies
         run: |
@@ -55,42 +149,87 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install -r requirements-manager.txt
           pip install pyinstaller
 
-      - name: Build binary with PyInstaller
-        run: pyinstaller build/build_linux.spec
+      - name: Build service binary
+        run: pyinstaller build/build_service_linux.spec
 
-      - name: Create tar.gz archive
+      - name: Build manager binary
+        run: pyinstaller build/build_manager_linux.spec
+
+      - name: Build self-updater binary
+        run: pyinstaller build/build_self_updater.spec
+
+      - name: Create archives
         run: |
           cd dist
           tar czf relims-print-service-linux.tar.gz relims-print-service
+          tar czf relims-print-manager-linux.tar.gz relims-print-manager
 
-      - name: Upload binary as artifact
+      - name: Create Linux installer script
+        run: |
+          cp build/linux_installer_header.sh dist/relims-print-manager-linux-install.sh
+          tar czf - -C dist relims-print-service relims-print-manager relims-self-updater >> dist/relims-print-manager-linux-install.sh
+          chmod +x dist/relims-print-manager-linux-install.sh
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: relims-print-service-linux
-          path: dist/relims-print-service-linux.tar.gz
+          name: linux-artifacts
+          path: |
+            dist/relims-print-service-linux.tar.gz
+            dist/relims-print-manager-linux.tar.gz
+            dist/relims-print-manager-linux-install.sh
 
   release:
     name: Create GitHub Release
-    needs: [build-windows, build-linux]
+    needs: [build-windows, build-windows-installer, build-linux]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
-      - name: Download Windows artifact
+      - name: Extract version
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+
+      - name: Download Windows binaries
         uses: actions/download-artifact@v4
         with:
-          name: relims-print-service-windows
+          name: windows-binaries
           path: artifacts/
 
-      - name: Download Linux artifact
+      - name: Download Windows installer
         uses: actions/download-artifact@v4
         with:
-          name: relims-print-service-linux
+          name: windows-installer
           path: artifacts/
+
+      - name: Download Linux artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-artifacts
+          path: artifacts/
+
+      - name: Generate manifest.json
+        shell: python
+        run: |
+          import json
+          manifest = {
+              "version": "${{ steps.version.outputs.version }}",
+              "service_version": "${{ steps.version.outputs.version }}",
+              "manager_version": "${{ steps.version.outputs.version }}",
+              "assets": {
+                  "service_windows": "relims-print-service.exe",
+                  "service_linux": "relims-print-service-linux.tar.gz",
+                  "manager_windows": "relims-print-manager.exe",
+                  "manager_linux": "relims-print-manager-linux.tar.gz"
+              }
+          }
+          with open("artifacts/manifest.json", "w") as f:
+              json.dump(manifest, f, indent=2)
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -98,4 +237,9 @@ jobs:
           files: |
             artifacts/relims-print-service.exe
             artifacts/relims-print-service-linux.tar.gz
+            artifacts/relims-print-manager.exe
+            artifacts/relims-print-manager-linux.tar.gz
+            artifacts/relims-print-manager-setup.exe
+            artifacts/relims-print-manager-linux-install.sh
+            artifacts/manifest.json
           generate_release_notes: true

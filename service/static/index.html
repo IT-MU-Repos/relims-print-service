@@ -149,10 +149,35 @@ async function saveConfig() {
   } catch (e) { showMsg("Error: " + e.message, false); }
 }
 
+function generateTestImage() {
+  const canvas = document.createElement("canvas");
+  canvas.width = 480;
+  canvas.height = 240;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "white";
+  ctx.fillRect(0, 0, 480, 240);
+  ctx.fillStyle = "black";
+  ctx.font = "bold 28px sans-serif";
+  ctx.fillText("ReLIMS Test Print", 40, 70);
+  ctx.font = "20px sans-serif";
+  ctx.fillText(new Date().toLocaleString(), 40, 110);
+  ctx.font = "16px sans-serif";
+  ctx.fillText("480x240 @ 203 DPI (60mm x 30mm)", 40, 150);
+  return canvas.toDataURL("image/png").split(",")[1];
+}
+
 async function testPrint() {
+  const backend = document.querySelector('input[name="backend"]:checked').value;
   const zpl = "^XA^FO50,50^A0N,40,40^FDReLIMS Test Print^FS^FO50,100^A0N,30,30^FD" + new Date().toLocaleString() + "^FS^XZ";
+  const body = { zpl };
+  // For CUPS and Windows backends, also send an image so printers with
+  // drivers (e.g., Citizen ctzcls) that don't understand raw ZPL can
+  // receive image data through the driver pipeline instead.
+  if (backend === "cups" || backend === "windows") {
+    body.image = generateTestImage();
+  }
   try {
-    const r = await fetch(API + "/print", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ zpl }) });
+    const r = await fetch(API + "/print", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body) });
     const d = await r.json();
     if (d.success) showMsg("Test label sent to printer", true);
     else showMsg("Print failed: " + d.error, false);

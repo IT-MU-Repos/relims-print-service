@@ -1,21 +1,21 @@
 # -*- mode: python ; coding: utf-8 -*-
 # PyInstaller spec for ReLIMS Print Service (Linux)
-# Build: pyinstaller build/build_linux.spec
+# Build: pyinstaller build/build_service_linux.spec
 
-import sys
 from pathlib import Path
 
 block_cipher = None
 base_dir = Path(SPECPATH).parent
+service_dir = base_dir / 'service'
 
 a = Analysis(
-    [str(base_dir / 'app_linux.py')],
-    pathex=[str(base_dir)],
+    [str(service_dir / 'app_linux.py')],
+    pathex=[str(service_dir)],
     binaries=[],
     datas=[
-        (str(base_dir / 'static'), 'static'),
+        (str(service_dir / 'static'), 'static'),
     ],
-    hiddenimports=['pystray._xorg'],
+    hiddenimports=[],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

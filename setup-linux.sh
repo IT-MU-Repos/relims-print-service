@@ -1,11 +1,14 @@
 #!/bin/bash
 #
-# ReLIMS Print Service - Linux Setup Script
+# ReLIMS Print Manager - Linux Dev Setup Script
+#
+# This script sets up a development environment.
+# For production, use the installer from GitHub Releases.
 #
 # This script:
 # 1. Creates a virtual environment
-# 2. Installs dependencies
-# 3. Optionally installs as a systemd user service
+# 2. Installs dependencies (service + manager)
+# 3. Optionally installs the service as a systemd user service
 #
 
 set -e
@@ -15,8 +18,11 @@ VENV_DIR="$SCRIPT_DIR/.venv"
 SERVICE_NAME="relims-print-service"
 
 echo "========================================"
-echo "ReLIMS Print Service - Linux Setup"
+echo "ReLIMS Print Manager - Linux Dev Setup"
 echo "========================================"
+echo
+echo "This sets up a development environment."
+echo "For production, use the installer from GitHub Releases."
 echo
 
 # Check for Python 3
@@ -41,21 +47,14 @@ python3 -m venv "$VENV_DIR"
 echo "Installing dependencies..."
 source "$VENV_DIR/bin/activate"
 pip install --upgrade pip
-pip install flask flask-cors
+pip install -r "$SCRIPT_DIR/requirements.txt"
+pip install -r "$SCRIPT_DIR/requirements-manager.txt"
 
-# Optional: Install system tray support
-echo
-read -p "Install system tray support? (requires GTK) [y/N]: " install_tray
-if [[ "$install_tray" =~ ^[Yy]$ ]]; then
-    # GTK dependencies for pystray
-    echo "Installing system tray dependencies..."
-    pip install pystray Pillow
-
-    # Check for GTK
-    if ! python3 -c "import gi; gi.require_version('Gtk', '3.0')" 2>/dev/null; then
-        echo "WARNING: GTK 3 not found. System tray may not work."
-        echo "Install with: sudo apt install python3-gi gir1.2-gtk-3.0 gir1.2-appindicator3-0.1"
-    fi
+# Check for GTK (needed for system tray)
+if ! python3 -c "import gi; gi.require_version('Gtk', '3.0')" 2>/dev/null; then
+    echo
+    echo "WARNING: GTK 3 not found. System tray may not work."
+    echo "Install with: sudo apt install python3-gi gir1.2-gtk-3.0 gir1.2-appindicator3-0.1"
 fi
 
 echo
@@ -63,18 +62,20 @@ echo "========================================"
 echo "Installation complete!"
 echo "========================================"
 echo
-echo "To run manually:"
-echo "  cd $SCRIPT_DIR"
-echo "  source .venv/bin/activate"
-echo "  python app_linux.py"
+echo "To run the print service (dev mode):"
+echo "  source $VENV_DIR/bin/activate"
+echo "  cd $SCRIPT_DIR/service"
+echo "  python app_linux.py --debug"
 echo
-echo "Or run headless (no system tray):"
-echo "  python app_linux.py --headless"
+echo "To run the manager (dev mode):"
+echo "  source $VENV_DIR/bin/activate"
+echo "  cd $SCRIPT_DIR/manager"
+echo "  python main_linux.py"
 echo
 
-# Offer to install as systemd service
+# Offer to install service as systemd unit
 echo
-read -p "Install as systemd user service (auto-start on login)? [y/N]: " install_service
+read -p "Install print service as systemd user service (auto-start on login)? [y/N]: " install_service
 if [[ "$install_service" =~ ^[Yy]$ ]]; then
     mkdir -p ~/.config/systemd/user
 
@@ -85,8 +86,8 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=$SCRIPT_DIR
-ExecStart=$VENV_DIR/bin/python $SCRIPT_DIR/app_linux.py --headless
+WorkingDirectory=$SCRIPT_DIR/service
+ExecStart=$VENV_DIR/bin/python $SCRIPT_DIR/service/app_linux.py
 Restart=on-failure
 RestartSec=5
 

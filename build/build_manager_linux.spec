@@ -1,21 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
-# PyInstaller spec for ReLIMS Print Service
-# Build: pyinstaller build/build.spec
+# PyInstaller spec for ReLIMS Print Manager (Linux)
+# Build: pyinstaller build/build_manager_linux.spec
 
-import sys
 from pathlib import Path
 
 block_cipher = None
 base_dir = Path(SPECPATH).parent
+manager_dir = base_dir / 'manager'
 
 a = Analysis(
-    [str(base_dir / 'app.py')],
-    pathex=[str(base_dir)],
+    [str(manager_dir / 'main_linux.py')],
+    pathex=[str(manager_dir)],
     binaries=[],
-    datas=[
-        (str(base_dir / 'static'), 'static'),
-    ],
-    hiddenimports=['win32print', 'win32api'],
+    datas=[],
+    hiddenimports=['pystray._xorg', 'pystray._appindicator'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -32,18 +30,17 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='relims-print-service',
+    name='relims-print-manager',
     debug=False,
     bootloader_ignore_signals=False,
-    strip=False,
+    strip=True,
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,
+    console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=str(base_dir / 'build' / 'icon.ico') if (base_dir / 'build' / 'icon.ico').exists() else None,
 )
