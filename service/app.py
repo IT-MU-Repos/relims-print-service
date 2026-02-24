@@ -4,17 +4,52 @@ A headless local service that receives print jobs from the browser
 and sends them to Windows or network printers via ZPL or image data.
 """
 import base64
+import collections
+import logging
 import sys
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
-from config import load_config, save_config
+from config import load_config, save_config, get_config_path
 from printer import get_printer, WindowsPrinter, HAS_WIN32
 from version import VERSION
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 CORS(app)
+
+# ---------------------------------------------------------------------------
+# Logging — write to file next to config + keep last 200 lines in memory
+# ---------------------------------------------------------------------------
+LOG_BUFFER_SIZE = 200
+_log_buffer = collections.deque(maxlen=LOG_BUFFER_SIZE)
+
+
+class _BufferHandler(logging.Handler):
+    """Keep recent log lines in a deque so /logs can serve them."""
+    def emit(self, record):
+        _log_buffer.append(self.format(record))
+
+
+def _setup_logging():
+    log_path = get_config_path().parent / "print-service.log"
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+
+    file_handler = logging.FileHandler(str(log_path), encoding="utf-8")
+    file_handler.setFormatter(fmt)
+
+    buf_handler = _BufferHandler()
+    buf_handler.setFormatter(fmt)
+
+    logger = logging.getLogger("print-service")
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(file_handler)
+    logger.addHandler(buf_handler)
+
+    return logger
+
+
+logger = _setup_logging()
 
 
 @app.route("/")
@@ -66,6 +101,10 @@ def print_label():
         printer = get_printer()
     except RuntimeError as e:
         return jsonify({"success": False, "error": str(e)}), 500
+
+    logger.info("/print request: copies=%d, has_image=%s, has_zpl=%s",
+                copies, bool(image_b64), bool(zpl))
+
     # If image data is provided and printer supports it, prefer image printing.
     # This is needed for Citizen printers which need images sent through
     # the driver (e.g., ctzcls on CUPS, or Citizen Windows driver) rather than raw ZPL.
@@ -79,6 +118,7 @@ def print_label():
             status_code = 200 if result["success"] else 500
             return jsonify(result), status_code
         # Image printing failed but we have ZPL as fallback
+        logger.info("Image print failed, falling back to ZPL")
     result = printer.print_zpl(zpl, copies=copies)
     status_code = 200 if result["success"] else 500
     return jsonify(result), status_code
@@ -96,6 +136,10 @@ def print_batch():
         printer = get_printer()
     except RuntimeError as e:
         return jsonify({"success": False, "error": str(e)}), 500
+
+    logger.info("/print-batch request: copies=%d, images=%d, zpls=%d",
+                copies, len(images_b64), len(zpls))
+
     # Prefer image batch if provided
     if images_b64:
         try:
@@ -127,10 +171,17 @@ def print_batch():
     return jsonify(result), status_code
 
 
+@app.route("/logs")
+def get_logs():
+    """Return recent log entries for debugging."""
+    return jsonify({"lines": list(_log_buffer)})
+
+
 def main():
     cfg = load_config()
     port = cfg["api_port"]
     debug = "--debug" in sys.argv
+    logger.info("ReLIMS Print Service v%s starting on port %d", VERSION, port)
     print(f"ReLIMS Print Service v{VERSION} running on http://localhost:{port}")
     app.run(host="127.0.0.1", port=port, debug=debug)
 

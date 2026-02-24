@@ -28,6 +28,9 @@
     .msg.ok { display: block; background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534; }
     .msg.err { display: block; background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; }
     .hidden { display: none; }
+    .log-box { margin-top: 16px; padding: 12px; background: #1e1e1e; color: #d4d4d4; border-radius: 6px; font-family: "Cascadia Code", "Fira Code", Consolas, monospace; font-size: 11px; max-height: 300px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; display: none; }
+    .log-box.visible { display: block; }
+    .log-toggle { margin-top: 12px; font-size: 13px; color: #2563eb; cursor: pointer; text-decoration: underline; background: none; border: none; padding: 0; }
   </style>
 </head>
 <body>
@@ -64,6 +67,8 @@
     </div>
 
     <div id="msg" class="msg"></div>
+    <button class="log-toggle" onclick="toggleLogs()">View Logs</button>
+    <div id="logBox" class="log-box"></div>
   </div>
 
 <script>
@@ -179,9 +184,32 @@ async function testPrint() {
   try {
     const r = await fetch(API + "/print", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body) });
     const d = await r.json();
-    if (d.success) showMsg("Test label sent to printer", true);
-    else showMsg("Print failed: " + d.error, false);
+    if (d.success) {
+      let msg = "Test label sent to printer";
+      if (d.detail) msg += " (detail: " + d.detail + ")";
+      showMsg(msg, true);
+    } else {
+      showMsg("Print failed: " + (d.error || "Unknown error") + (d.detail ? "\nDetail: " + d.detail : ""), false);
+    }
   } catch (e) { showMsg("Error: " + e.message, false); }
+}
+
+async function toggleLogs() {
+  const box = document.getElementById("logBox");
+  if (box.classList.contains("visible")) {
+    box.classList.remove("visible");
+    return;
+  }
+  try {
+    const r = await fetch(API + "/logs");
+    const d = await r.json();
+    box.textContent = d.lines.length ? d.lines.join("\n") : "(no log entries yet)";
+    box.classList.add("visible");
+    box.scrollTop = box.scrollHeight;
+  } catch (e) {
+    box.textContent = "Failed to load logs: " + e.message;
+    box.classList.add("visible");
+  }
 }
 
 loadStatus();

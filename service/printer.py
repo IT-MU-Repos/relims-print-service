@@ -1,3 +1,4 @@
+import logging
 import os
 import socket
 import subprocess
@@ -9,6 +10,8 @@ try:
     HAS_WIN32 = True
 except ImportError:
     HAS_WIN32 = False
+
+logger = logging.getLogger("print-service")
 
 
 class NetworkPrinter:
@@ -27,10 +30,14 @@ class NetworkPrinter:
                 sock.connect((self.host, self.port))
                 for _ in range(copies):
                     sock.sendall(zpl.encode("utf-8"))
+            logger.info("ZPL sent to %s:%s (%d copies)", self.host, self.port, copies)
             return {"success": True, "copies": copies}
         except socket.timeout:
-            return {"success": False, "error": f"Connection timed out to {self.host}:{self.port}"}
+            msg = f"Connection timed out to {self.host}:{self.port}"
+            logger.error("ZPL print failed: %s", msg)
+            return {"success": False, "error": msg}
         except OSError as e:
+            logger.error("ZPL print failed: %s", e)
             return {"success": False, "error": f"Network error: {e}"}
 
     def print_image(self, image_data, copies=1):
@@ -49,10 +56,14 @@ class NetworkPrinter:
                     for _ in range(copies_each):
                         sock.sendall(zpl.encode("utf-8"))
                     printed += 1
+            logger.info("ZPL batch sent to %s:%s (%d/%d)", self.host, self.port, printed, len(zpls))
             return {"success": True, "printed": printed, "total": len(zpls)}
         except socket.timeout:
-            return {"success": False, "printed": printed, "total": len(zpls), "error": f"Connection timed out to {self.host}:{self.port}"}
+            msg = f"Connection timed out to {self.host}:{self.port}"
+            logger.error("ZPL batch failed after %d/%d: %s", printed, len(zpls), msg)
+            return {"success": False, "printed": printed, "total": len(zpls), "error": msg}
         except OSError as e:
+            logger.error("ZPL batch failed after %d/%d: %s", printed, len(zpls), e)
             return {"success": False, "printed": printed, "total": len(zpls), "error": f"Network error: {e}"}
 
 
@@ -75,8 +86,10 @@ class WindowsPrinter:
                 win32print.EndDocPrinter(handle)
             finally:
                 win32print.ClosePrinter(handle)
+            logger.info("ZPL sent to '%s' (%d copies)", self.printer_name, copies)
             return {"success": True, "copies": copies, "printer": self.printer_name}
         except Exception as e:
+            logger.error("ZPL print to '%s' failed: %s", self.printer_name, e)
             return {"success": False, "error": str(e)}
 
     def print_batch_zpl(self, zpls, copies_each=1):
@@ -95,8 +108,10 @@ class WindowsPrinter:
                 win32print.EndDocPrinter(handle)
             finally:
                 win32print.ClosePrinter(handle)
+            logger.info("ZPL batch to '%s' (%d/%d)", self.printer_name, printed, len(zpls))
             return {"success": True, "printed": printed, "total": len(zpls), "printer": self.printer_name}
         except Exception as e:
+            logger.error("ZPL batch to '%s' failed: %s", self.printer_name, e)
             return {"success": False, "printed": 0, "total": len(zpls), "error": str(e)}
 
     def print_image(self, image_data, copies=1):
@@ -111,30 +126,42 @@ class WindowsPrinter:
             with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
                 f.write(image_data)
                 tmp_path = f.name
+            logger.info("Image print to '%s' (%d copies, %d bytes, tmp=%s)",
+                        self.printer_name, copies, len(image_data), tmp_path)
             ps_script = (
                 'Add-Type -AssemblyName System.Drawing; '
                 f'$img = [System.Drawing.Image]::FromFile("{tmp_path}"); '
                 '$pd = New-Object System.Drawing.Printing.PrintDocument; '
+                '$pd.PrintController = New-Object System.Drawing.Printing.StandardPrintController; '
                 f'$pd.PrinterSettings.PrinterName = "{self.printer_name}"; '
                 f'$pd.PrinterSettings.Copies = {copies}; '
                 '$pd.add_PrintPage({ param($s,$e) '
                 '$e.Graphics.DrawImage($img, $e.MarginBounds) }); '
                 '$pd.Print(); $img.Dispose(); $pd.Dispose()'
             )
-            CREATE_NO_WINDOW = 0x08000000
             result = subprocess.run(
-                ['powershell', '-NoProfile', '-NonInteractive', '-Command', ps_script],
+                ['powershell', '-NoProfile', '-NonInteractive',
+                 '-WindowStyle', 'Hidden', '-Command', ps_script],
                 capture_output=True,
                 timeout=30,
-                creationflags=CREATE_NO_WINDOW,
             )
+            stdout = result.stdout.decode('utf-8', errors='replace').strip()
+            stderr = result.stderr.decode('utf-8', errors='replace').strip()
+            if stdout:
+                logger.info("PowerShell stdout: %s", stdout)
+            if stderr:
+                logger.warning("PowerShell stderr: %s", stderr)
             if result.returncode != 0:
-                error_msg = result.stderr.decode('utf-8').strip()
-                return {"success": False, "error": f"Print failed: {error_msg}"}
-            return {"success": True, "copies": copies, "printer": self.printer_name}
+                logger.error("Image print failed (exit %d): %s", result.returncode, stderr)
+                return {"success": False, "error": f"Print failed: {stderr}", "detail": stderr}
+            logger.info("Image print succeeded (exit 0)")
+            return {"success": True, "copies": copies, "printer": self.printer_name,
+                    "detail": stderr if stderr else None}
         except subprocess.TimeoutExpired:
+            logger.error("Image print timed out")
             return {"success": False, "error": "Print command timed out"}
         except OSError as e:
+            logger.error("Image print OS error: %s", e)
             return {"success": False, "error": str(e)}
         finally:
             if tmp_path:
