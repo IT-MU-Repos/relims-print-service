@@ -105,23 +105,27 @@ def print_label():
     logger.info("/print request: copies=%d, has_image=%s, has_zpl=%s",
                 copies, bool(image_b64), bool(zpl))
 
-    # If image data is provided and printer supports it, prefer image printing.
-    # This is needed for Citizen printers which need images sent through
-    # the driver (e.g., ctzcls on CUPS, or Citizen Windows driver) rather than raw ZPL.
+    # Prefer ZPL when available — ZPL printers (e.g. Zebra ZD220) need raw
+    # ZPL commands via win32print RAW.  Image printing via PowerShell
+    # PrintDocument may "succeed" at the OS/spooler level but produce no
+    # output because the ZPL driver cannot render raster data.
+    if zpl:
+        result = printer.print_zpl(zpl, copies=copies)
+        if result["success"] or not image_b64:
+            status_code = 200 if result["success"] else 500
+            return jsonify(result), status_code
+        # ZPL failed but we have image as fallback
+        logger.info("ZPL print failed, falling back to image")
+    # Image fallback (or image-only request for Citizen/driver-based printers)
     if image_b64:
         try:
             image_data = base64.b64decode(image_b64)
         except Exception:
             return jsonify({"success": False, "error": "Invalid base64 image data"}), 400
         result = printer.print_image(image_data, copies=copies)
-        if result["success"] or not zpl:
-            status_code = 200 if result["success"] else 500
-            return jsonify(result), status_code
-        # Image printing failed but we have ZPL as fallback
-        logger.info("Image print failed, falling back to ZPL")
-    result = printer.print_zpl(zpl, copies=copies)
-    status_code = 200 if result["success"] else 500
-    return jsonify(result), status_code
+        status_code = 200 if result["success"] else 500
+        return jsonify(result), status_code
+    return jsonify({"success": False, "error": "No printable data"}), 400
 
 
 @app.route("/print-batch", methods=["POST"])
@@ -140,7 +144,20 @@ def print_batch():
     logger.info("/print-batch request: copies=%d, images=%d, zpls=%d",
                 copies, len(images_b64), len(zpls))
 
-    # Prefer image batch if provided
+    # Prefer ZPL batch (same reasoning as /print — ZPL printers need raw commands)
+    if zpls:
+        if hasattr(printer, 'print_batch_zpl'):
+            result = printer.print_batch_zpl(zpls, copies_each=copies)
+        else:
+            printed = 0
+            for zpl in zpls:
+                r = printer.print_zpl(zpl, copies=copies)
+                if r["success"]:
+                    printed += 1
+            result = {"success": printed == len(zpls), "printed": printed, "total": len(zpls)}
+        status_code = 200 if result["success"] else 500
+        return jsonify(result), status_code
+    # Image batch fallback
     if images_b64:
         try:
             images = [base64.b64decode(img) for img in images_b64]
@@ -157,18 +174,7 @@ def print_batch():
             result = {"success": printed == len(images), "printed": printed, "total": len(images)}
         status_code = 200 if result["success"] else 500
         return jsonify(result), status_code
-    # ZPL batch
-    if hasattr(printer, 'print_batch_zpl'):
-        result = printer.print_batch_zpl(zpls, copies_each=copies)
-    else:
-        printed = 0
-        for zpl in zpls:
-            r = printer.print_zpl(zpl, copies=copies)
-            if r["success"]:
-                printed += 1
-        result = {"success": printed == len(zpls), "printed": printed, "total": len(zpls)}
-    status_code = 200 if result["success"] else 500
-    return jsonify(result), status_code
+    return jsonify({"success": False, "error": "No printable data"}), 400
 
 
 @app.route("/logs")
