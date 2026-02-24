@@ -115,16 +115,19 @@ class WindowsPrinter:
                 'Add-Type -AssemblyName System.Drawing; '
                 f'$img = [System.Drawing.Image]::FromFile("{tmp_path}"); '
                 '$pd = New-Object System.Drawing.Printing.PrintDocument; '
+                '$pd.PrintController = New-Object System.Drawing.Printing.StandardPrintController; '
                 f'$pd.PrinterSettings.PrinterName = "{self.printer_name}"; '
                 f'$pd.PrinterSettings.Copies = {copies}; '
                 '$pd.add_PrintPage({ param($s,$e) '
                 '$e.Graphics.DrawImage($img, $e.MarginBounds) }); '
                 '$pd.Print(); $img.Dispose(); $pd.Dispose()'
             )
+            CREATE_NO_WINDOW = 0x08000000
             result = subprocess.run(
                 ['powershell', '-NoProfile', '-NonInteractive', '-Command', ps_script],
                 capture_output=True,
                 timeout=30,
+                creationflags=CREATE_NO_WINDOW,
             )
             if result.returncode != 0:
                 error_msg = result.stderr.decode('utf-8').strip()
