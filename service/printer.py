@@ -139,11 +139,12 @@ class WindowsPrinter:
                 '$e.Graphics.DrawImage($img, $e.MarginBounds) }); '
                 '$pd.Print(); $img.Dispose(); $pd.Dispose()'
             )
+            CREATE_NO_WINDOW = 0x08000000
             result = subprocess.run(
-                ['powershell', '-NoProfile', '-NonInteractive',
-                 '-WindowStyle', 'Hidden', '-Command', ps_script],
+                ['powershell', '-NoProfile', '-NonInteractive', '-Command', ps_script],
                 capture_output=True,
                 timeout=30,
+                creationflags=CREATE_NO_WINDOW,
             )
             stdout = result.stdout.decode('utf-8', errors='replace').strip()
             stderr = result.stderr.decode('utf-8', errors='replace').strip()

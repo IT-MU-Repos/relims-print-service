@@ -90,7 +90,7 @@ def start_service() -> bool:
     try:
         proc = subprocess.Popen(
             [str(service_bin)],
-            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW,
+            creationflags=subprocess.DETACHED_PROCESS,
             close_fds=True,
         )
         _save_pid(proc.pid)
