@@ -163,8 +163,13 @@ jobs:
 
       - name: Create archives
         run: |
+          mkdir -p packaging/relims-print-service
+          cp dist/relims-print-service packaging/relims-print-service/relims-print-service
+          cp setup-print-service.sh packaging/relims-print-service/setup-print-service.sh
+          chmod +x packaging/relims-print-service/relims-print-service
+          chmod +x packaging/relims-print-service/setup-print-service.sh
+          tar czf dist/relims-print-service-linux.tar.gz -C packaging relims-print-service
           cd dist
-          tar czf relims-print-service-linux.tar.gz relims-print-service
           tar czf relims-print-manager-linux.tar.gz relims-print-manager
 
       - name: Create Linux installer script

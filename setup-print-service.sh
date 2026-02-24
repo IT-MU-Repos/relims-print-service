@@ -15,8 +15,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENV_PYTHON="$SCRIPT_DIR/.venv/bin/python"
-SERVICE_DIR="$SCRIPT_DIR/service"
+SERVICE_BINARY="$SCRIPT_DIR/relims-print-service"
 SERVICE_NAME="relims-print-service"
 UNIT_DIR="$HOME/.config/systemd/user"
 UNIT_FILE="$UNIT_DIR/$SERVICE_NAME.service"
@@ -38,16 +37,25 @@ if [[ "${1:-}" == "uninstall" ]]; then
 fi
 
 # --- Preflight checks ---
-if [[ ! -f "$VENV_PYTHON" ]]; then
-    echo -e "${RED}ERROR: Virtual environment not found at $SCRIPT_DIR/.venv${NC}"
-    echo "Run setup-linux.sh first to create the virtual environment."
+if [[ ! -f "$SERVICE_BINARY" ]]; then
+    echo -e "${RED}ERROR: relims-print-service binary not found in $SCRIPT_DIR${NC}"
+    echo "Make sure the binary is in the same directory as this script."
     exit 1
 fi
 
-if [[ ! -f "$SERVICE_DIR/app_linux.py" ]]; then
-    echo -e "${RED}ERROR: app_linux.py not found in $SERVICE_DIR${NC}"
+if ! command -v systemctl &> /dev/null; then
+    echo -e "${RED}ERROR: systemctl not found. This script requires systemd.${NC}"
     exit 1
 fi
+
+if ! command -v lp &> /dev/null; then
+    echo -e "${YELLOW}WARNING: CUPS not found. Only network printing (TCP/9100) will be available.${NC}"
+    echo "Install CUPS with: sudo apt install cups"
+    echo
+fi
+
+# Make binary executable
+chmod +x "$SERVICE_BINARY"
 
 # --- Install systemd service ---
 echo -e "${GREEN}Installing ReLIMS Print Service as systemd user service...${NC}"
@@ -61,9 +69,8 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=$SERVICE_DIR
-ExecStart=$VENV_PYTHON $SERVICE_DIR/app_linux.py
-Restart=always
+ExecStart=$SERVICE_BINARY
+Restart=on-failure
 RestartSec=5
 
 [Install]
