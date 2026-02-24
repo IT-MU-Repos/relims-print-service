@@ -1,10 +1,15 @@
 """Windows service lifecycle management for the print service."""
+import ctypes
+import ctypes.wintypes
 import json
-import os
 import subprocess
 import urllib.request
 
 from paths import get_service_binary_path, get_pid_file_path, get_service_url
+
+# Windows API constants for OpenProcess
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+STILL_ACTIVE = 259
 
 
 def _save_pid(pid: int):
@@ -29,13 +34,18 @@ def _clear_pid():
 
 
 def _is_pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except (OSError, SystemError):
-        # OSError: process doesn't exist or access denied
-        # SystemError: Windows returns invalid handle for some PIDs
+    """Check if a process with the given PID is alive using Windows API."""
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
         return False
+    try:
+        exit_code = ctypes.wintypes.DWORD()
+        if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return exit_code.value == STILL_ACTIVE
+        return False
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def is_service_running() -> bool:
