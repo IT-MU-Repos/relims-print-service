@@ -115,7 +115,6 @@ class WindowsPrinter:
                 'Add-Type -AssemblyName System.Drawing; '
                 f'$img = [System.Drawing.Image]::FromFile("{tmp_path}"); '
                 '$pd = New-Object System.Drawing.Printing.PrintDocument; '
-                '$pd.PrintController = New-Object System.Drawing.Printing.StandardPrintController; '
                 f'$pd.PrinterSettings.PrinterName = "{self.printer_name}"; '
                 f'$pd.PrinterSettings.Copies = {copies}; '
                 '$pd.add_PrintPage({ param($s,$e) '
