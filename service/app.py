@@ -54,18 +54,24 @@ logger = _setup_logging()
 
 
 def apply_zpl_offsets(zpl):
-    """Inject ^LS (horizontal) and ^LT (vertical) shift commands into ZPL."""
+    """Adjust ^LH (Label Home) coordinates to shift all label content."""
     cfg = load_config()
     ox = int(cfg.get("label_offset_x", 0))
     oy = int(cfg.get("label_offset_y", 0))
     if ox == 0 and oy == 0:
         return zpl
-    cmds = ""
-    if ox != 0:
-        cmds += f"^LS{ox}"
-    if oy != 0:
-        cmds += f"^LT{oy}"
-    return re.sub(r'(\^XA)', r'\1' + cmds, zpl, flags=re.IGNORECASE)
+
+    def adjust_lh(match):
+        x = int(match.group(1)) + ox
+        y = int(match.group(2)) + oy
+        return f"^LH{max(0, x)},{max(0, y)}"
+
+    if re.search(r'\^LH\d+,\d+', zpl, re.IGNORECASE):
+        return re.sub(r'\^LH(\d+),(\d+)', adjust_lh, zpl, flags=re.IGNORECASE)
+
+    # No ^LH found — inject one after ^XA
+    lh = f"^LH{max(0, ox)},{max(0, oy)}"
+    return re.sub(r'(\^XA)', r'\1' + lh, zpl, flags=re.IGNORECASE)
 
 
 @app.route("/")

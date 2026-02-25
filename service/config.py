@@ -15,6 +15,10 @@ DEFAULT_CONFIG = {
     "timeout": 5,
     "label_offset_x": 0,
     "label_offset_y": 0,
+    "label_origin_x": 0,
+    "label_origin_y": 0,
+    "label_width": 0,
+    "label_height": 0,
 }
 
 

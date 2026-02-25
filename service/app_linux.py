@@ -56,18 +56,46 @@ logger = _setup_logging()
 
 
 def apply_zpl_offsets(zpl):
-    """Inject ^LS (horizontal) and ^LT (vertical) shift commands into ZPL."""
+    """Adjust ZPL positioning using calibrated origin + fine-tune offsets.
+
+    Calibrated origin (label_origin_x/y) compensates for the gap between
+    the printhead's coordinate x=0 and the physical label edge. Fine-tune
+    offsets (label_offset_x/y) allow further per-printer adjustment.
+
+    Also overrides ^PW to full printhead width (832 dots) when a calibrated
+    origin is set, preventing the printer's stored print width from clipping.
+    """
     cfg = load_config()
-    ox = int(cfg.get("label_offset_x", 0))
-    oy = int(cfg.get("label_offset_y", 0))
-    if ox == 0 and oy == 0:
+    origin_x = int(cfg.get("label_origin_x", 0))
+    origin_y = int(cfg.get("label_origin_y", 0))
+    fine_x = int(cfg.get("label_offset_x", 0))
+    fine_y = int(cfg.get("label_offset_y", 0))
+    total_x = origin_x + fine_x
+    total_y = origin_y + fine_y
+
+    if total_x == 0 and total_y == 0 and origin_x == 0:
         return zpl
-    cmds = ""
-    if ox != 0:
-        cmds += f"^LS{ox}"
-    if oy != 0:
-        cmds += f"^LT{oy}"
-    return re.sub(r'(\^XA)', r'\1' + cmds, zpl, flags=re.IGNORECASE)
+
+    def adjust_lh(match):
+        x = int(match.group(1)) + total_x
+        y = int(match.group(2)) + total_y
+        return f"^LH{max(0, x)},{max(0, y)}"
+
+    if re.search(r'\^LH\d+,\d+', zpl, re.IGNORECASE):
+        zpl = re.sub(r'\^LH(\d+),(\d+)', adjust_lh, zpl, flags=re.IGNORECASE)
+    else:
+        lh = f"^LH{max(0, total_x)},{max(0, total_y)}"
+        zpl = re.sub(r'(\^XA)', r'\1' + lh, zpl, flags=re.IGNORECASE)
+
+    # Override ^PW to full printhead width when calibrated, so content
+    # shifted by the origin offset isn't clipped by a narrow print width.
+    if origin_x > 0:
+        if re.search(r'\^PW\d+', zpl, re.IGNORECASE):
+            zpl = re.sub(r'\^PW\d+', '^PW832', zpl, flags=re.IGNORECASE)
+        else:
+            zpl = re.sub(r'(\^XA)', r'\1^PW832', zpl, flags=re.IGNORECASE)
+
+    return zpl
 
 
 @app.route("/")
@@ -96,9 +124,11 @@ def get_config():
 def update_config():
     data = request.get_json(force=True)
     allowed = {"printer_name", "printer_host", "printer_port", "backend", "api_port", "timeout",
-               "label_offset_x", "label_offset_y"}
+               "label_offset_x", "label_offset_y",
+               "label_origin_x", "label_origin_y", "label_width", "label_height"}
     filtered = {k: v for k, v in data.items() if k in allowed}
-    for int_key in ("printer_port", "api_port", "timeout", "label_offset_x", "label_offset_y"):
+    for int_key in ("printer_port", "api_port", "timeout", "label_offset_x", "label_offset_y",
+                    "label_origin_x", "label_origin_y", "label_width", "label_height"):
         if int_key in filtered:
             filtered[int_key] = int(filtered[int_key])
     updated = save_config(filtered)
@@ -113,17 +143,19 @@ def print_label():
     if not zpl and not image_b64:
         return jsonify({"success": False, "error": "No ZPL or image data provided"}), 400
     copies = max(1, int(data.get("copies", 1)))
+    raw = data.get("raw", False)
     try:
         printer = get_printer()
     except RuntimeError as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
-    logger.info("/print request: copies=%d, has_image=%s, has_zpl=%s",
-                copies, bool(image_b64), bool(zpl))
+    logger.info("/print request: copies=%d, has_image=%s, has_zpl=%s, raw=%s",
+                copies, bool(image_b64), bool(zpl), raw)
 
     # Prefer ZPL when available — sends raw ZPL commands to the printer.
     if zpl:
-        result = printer.print_zpl(apply_zpl_offsets(zpl), copies=copies)
+        final_zpl = zpl if raw else apply_zpl_offsets(zpl)
+        result = printer.print_zpl(final_zpl, copies=copies)
         if result["success"] or not image_b64:
             status_code = 200 if result["success"] else 500
             return jsonify(result), status_code

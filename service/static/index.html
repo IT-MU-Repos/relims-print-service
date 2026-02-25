@@ -7,7 +7,7 @@
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f5f5f5; color: #333; }
-    .container { max-width: 520px; margin: 40px auto; background: #fff; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,.1); padding: 32px; }
+    .container { max-width: 560px; margin: 40px auto; background: #fff; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,.1); padding: 32px; }
     h1 { font-size: 20px; margin-bottom: 4px; }
     .subtitle { color: #888; font-size: 13px; margin-bottom: 24px; }
     .status { display: flex; align-items: center; gap: 8px; margin-bottom: 24px; padding: 10px 14px; border-radius: 6px; background: #f0fdf4; border: 1px solid #bbf7d0; font-size: 14px; }
@@ -24,6 +24,9 @@
     .btn-primary:hover { background: #1d4ed8; }
     .btn-secondary { background: #e5e7eb; color: #333; }
     .btn-secondary:hover { background: #d1d5db; }
+    .btn-warning { background: #f59e0b; color: #fff; }
+    .btn-warning:hover { background: #d97706; }
+    .btn-sm { padding: 6px 14px; font-size: 12px; margin-top: 8px; }
     .msg { margin-top: 12px; padding: 10px 14px; border-radius: 6px; font-size: 13px; display: none; }
     .msg.ok { display: block; background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534; }
     .msg.err { display: block; background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; }
@@ -31,6 +34,14 @@
     .log-box { margin-top: 16px; padding: 12px; background: #1e1e1e; color: #d4d4d4; border-radius: 6px; font-family: "Cascadia Code", "Fira Code", Consolas, monospace; font-size: 11px; max-height: 300px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; display: none; }
     .log-box.visible { display: block; }
     .log-toggle { margin-top: 12px; font-size: 13px; color: #2563eb; cursor: pointer; text-decoration: underline; background: none; border: none; padding: 0; }
+    .cal-badge { display: inline-block; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+    .cal-badge.set { background: #dcfce7; color: #166534; }
+    .cal-badge.unset { background: #fef3c7; color: #92400e; }
+    .cal-inputs { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 8px; }
+    .cal-inputs label { margin-top: 0; }
+    .cal-step { font-size: 13px; color: #555; margin: 8px 0; line-height: 1.5; }
+    .cal-step b { color: #333; }
+    .cal-info { font-size: 12px; color: #888; margin-top: 4px; }
   </style>
 </head>
 <body>
@@ -61,16 +72,51 @@
       <input type="number" id="printerPort" value="9100">
     </div>
 
+    <!-- Calibration Section -->
     <div class="section">
-      <label style="margin-top:0">Label Position Offset</label>
-      <p style="font-size:12px;color:#888;margin-bottom:12px">Shift the entire label in dots (8 dots = 1mm at 203 DPI). 0 = no shift.</p>
+      <label style="margin-top:0">Label Calibration <span id="calBadge" class="cal-badge unset">Not calibrated</span></label>
+      <p class="cal-step">Calibration maps the printer's coordinate system to your physical label stock.</p>
+
+      <div id="calStatus" class="cal-info"></div>
+
+      <button class="btn btn-warning btn-sm" onclick="printCalibration()">1. Print Calibration Label</button>
+
+      <div id="calForm" class="hidden" style="margin-top:12px">
+        <p class="cal-step"><b>2.</b> Read the numbers from the printed label and enter them below:</p>
+        <div class="cal-inputs">
+          <div>
+            <label>First visible X</label>
+            <input type="number" id="calFirstX" placeholder="e.g. 230">
+          </div>
+          <div>
+            <label>Last visible X</label>
+            <input type="number" id="calLastX" placeholder="e.g. 710">
+          </div>
+          <div>
+            <label>First visible Y</label>
+            <input type="number" id="calFirstY" placeholder="e.g. 0">
+          </div>
+          <div>
+            <label>Last visible Y</label>
+            <input type="number" id="calLastY" placeholder="e.g. 240">
+          </div>
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="applyCalibration()">Apply Calibration</button>
+        <button class="btn btn-secondary btn-sm" onclick="clearCalibration()">Clear</button>
+      </div>
+    </div>
+
+    <!-- Fine-tune Offset Section -->
+    <div class="section">
+      <label style="margin-top:0">Fine-tune Offset</label>
+      <p style="font-size:12px;color:#888;margin-bottom:12px">Additional shift after calibration. Units: dots (8 dots &asymp; 1mm at 203 DPI).</p>
       <div style="display:flex;gap:16px">
         <div style="flex:1">
-          <label>Horizontal (+ right / - left)</label>
+          <label>Horizontal (+ right / &minus; left)</label>
           <input type="number" id="labelOffsetX" value="0" step="1">
         </div>
         <div style="flex:1">
-          <label>Vertical (+ down / - up)</label>
+          <label>Vertical (+ down / &minus; up)</label>
           <input type="number" id="labelOffsetY" value="0" step="1">
         </div>
       </div>
@@ -140,10 +186,30 @@ async function loadConfig() {
     document.getElementById("labelOffsetX").value = c.label_offset_x || 0;
     document.getElementById("labelOffsetY").value = c.label_offset_y || 0;
     toggleBackend();
-    // Set printer dropdown after printers load
     await loadPrinters();
     if (c.printer_name) document.getElementById("printerName").value = c.printer_name;
+    updateCalibrationDisplay(c);
   } catch { /* ignore */ }
+}
+
+function updateCalibrationDisplay(cfg) {
+  const ox = cfg.label_origin_x || 0;
+  const oy = cfg.label_origin_y || 0;
+  const w = cfg.label_width || 0;
+  const h = cfg.label_height || 0;
+  const badge = document.getElementById("calBadge");
+  const info = document.getElementById("calStatus");
+  if (ox > 0 || oy > 0 || w > 0 || h > 0) {
+    badge.className = "cal-badge set";
+    badge.textContent = "Calibrated";
+    const wmm = (w / 8).toFixed(1);
+    const hmm = (h / 8).toFixed(1);
+    info.textContent = `Origin: (${ox}, ${oy}) | Label: ${w}x${h} dots (${wmm}x${hmm} mm)`;
+  } else {
+    badge.className = "cal-badge unset";
+    badge.textContent = "Not calibrated";
+    info.textContent = "Print a calibration label to auto-detect your label size and position.";
+  }
 }
 
 function toggleBackend() {
@@ -173,32 +239,181 @@ async function saveConfig() {
   } catch (e) { showMsg("Error: " + e.message, false); }
 }
 
-function generateTestImage() {
+// ---------- Calibration ----------
+
+async function printCalibration() {
+  // Print a label with coordinate markers spanning the full printhead (832 dots)
+  // using ^PW832^LL300 to override any stored limits. Markers every 50 dots on
+  // X (0-800) and every 40 dots on Y (0-280). Sent raw to bypass all offsets.
+  const zpl = "^XA^PW832^LL300^LH0,0" +
+    // X markers row 1 at y=60
+    "^FO0,60^A0N,28,20^FD0^FS" +
+    "^FO50,60^A0N,28,20^FD50^FS" +
+    "^FO100,60^A0N,28,20^FD100^FS" +
+    "^FO150,60^A0N,28,20^FD150^FS" +
+    "^FO200,60^A0N,28,20^FD200^FS" +
+    "^FO250,60^A0N,28,20^FD250^FS" +
+    "^FO300,60^A0N,28,20^FD300^FS" +
+    "^FO350,60^A0N,28,20^FD350^FS" +
+    "^FO400,60^A0N,28,20^FD400^FS" +
+    "^FO450,60^A0N,28,20^FD450^FS" +
+    "^FO500,60^A0N,28,20^FD500^FS" +
+    "^FO550,60^A0N,28,20^FD550^FS" +
+    "^FO600,60^A0N,28,20^FD600^FS" +
+    "^FO650,60^A0N,28,20^FD650^FS" +
+    "^FO700,60^A0N,28,20^FD700^FS" +
+    "^FO750,60^A0N,28,20^FD750^FS" +
+    "^FO800,60^A0N,28,20^FD800^FS" +
+    // X markers row 2 at y=140 (same values, different Y for readability)
+    "^FO0,140^A0N,28,20^FD0^FS" +
+    "^FO100,140^A0N,28,20^FD100^FS" +
+    "^FO200,140^A0N,28,20^FD200^FS" +
+    "^FO300,140^A0N,28,20^FD300^FS" +
+    "^FO400,140^A0N,28,20^FD400^FS" +
+    "^FO500,140^A0N,28,20^FD500^FS" +
+    "^FO600,140^A0N,28,20^FD600^FS" +
+    "^FO700,140^A0N,28,20^FD700^FS" +
+    "^FO800,140^A0N,28,20^FD800^FS" +
+    // Y markers column at x=350
+    "^FO350,0^A0N,28,20^FDy0^FS" +
+    "^FO350,40^A0N,28,20^FDy40^FS" +
+    "^FO350,100^A0N,28,20^FDy100^FS" +
+    "^FO350,180^A0N,28,20^FDy180^FS" +
+    "^FO350,220^A0N,28,20^FDy220^FS" +
+    "^FO350,260^A0N,28,20^FDy260^FS" +
+    // Y markers column at x=500
+    "^FO500,0^A0N,28,20^FDy0^FS" +
+    "^FO500,40^A0N,28,20^FDy40^FS" +
+    "^FO500,100^A0N,28,20^FDy100^FS" +
+    "^FO500,180^A0N,28,20^FDy180^FS" +
+    "^FO500,220^A0N,28,20^FDy220^FS" +
+    "^FO500,260^A0N,28,20^FDy260^FS" +
+    "^XZ";
+  try {
+    const r = await fetch(API + "/print", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ zpl, raw: true })
+    });
+    const d = await r.json();
+    if (d.success) {
+      showMsg("Calibration label sent to printer", true);
+      document.getElementById("calForm").className = "";
+    } else {
+      showMsg("Print failed: " + (d.error || "Unknown"), false);
+    }
+  } catch (e) { showMsg("Error: " + e.message, false); }
+}
+
+async function applyCalibration() {
+  const firstX = parseInt(document.getElementById("calFirstX").value);
+  const lastX = parseInt(document.getElementById("calLastX").value);
+  const firstY = parseInt(document.getElementById("calFirstY").value);
+  const lastY = parseInt(document.getElementById("calLastY").value);
+
+  if (isNaN(firstX) || isNaN(lastX) || isNaN(firstY) || isNaN(lastY)) {
+    showMsg("Please fill in all four values from the calibration label", false);
+    return;
+  }
+  if (lastX <= firstX || lastY <= firstY) {
+    showMsg("Last values must be greater than first values", false);
+    return;
+  }
+
+  const body = {
+    label_origin_x: firstX,
+    label_origin_y: firstY,
+    label_width: lastX - firstX,
+    label_height: lastY - firstY,
+    label_offset_x: 0,
+    label_offset_y: 0,
+  };
+
+  try {
+    const r = await fetch(API + "/config", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body)
+    });
+    if (r.ok) {
+      const cfg = await r.json();
+      updateCalibrationDisplay(cfg);
+      document.getElementById("labelOffsetX").value = 0;
+      document.getElementById("labelOffsetY").value = 0;
+      showMsg(`Calibration saved! Origin: (${body.label_origin_x}, ${body.label_origin_y}), ` +
+              `Label: ${body.label_width}x${body.label_height} dots`, true);
+    } else {
+      showMsg("Failed to save calibration", false);
+    }
+  } catch (e) { showMsg("Error: " + e.message, false); }
+}
+
+async function clearCalibration() {
+  try {
+    const r = await fetch(API + "/config", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ label_origin_x: 0, label_origin_y: 0, label_width: 0, label_height: 0 })
+    });
+    if (r.ok) {
+      const cfg = await r.json();
+      updateCalibrationDisplay(cfg);
+      document.getElementById("calFirstX").value = "";
+      document.getElementById("calLastX").value = "";
+      document.getElementById("calFirstY").value = "";
+      document.getElementById("calLastY").value = "";
+      showMsg("Calibration cleared", true);
+    }
+  } catch (e) { showMsg("Error: " + e.message, false); }
+}
+
+// ---------- Test Print ----------
+
+function generateTestImage(w, h) {
   const canvas = document.createElement("canvas");
-  canvas.width = 480;
-  canvas.height = 240;
+  canvas.width = w;
+  canvas.height = h;
   const ctx = canvas.getContext("2d");
   ctx.fillStyle = "white";
-  ctx.fillRect(0, 0, 480, 240);
+  ctx.fillRect(0, 0, w, h);
   ctx.fillStyle = "black";
+  ctx.strokeStyle = "black";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(1, 1, w - 2, h - 2);
   ctx.font = "bold 28px sans-serif";
   ctx.fillText("ReLIMS Test Print", 40, 70);
   ctx.font = "20px sans-serif";
   ctx.fillText(new Date().toLocaleString(), 40, 110);
   ctx.font = "16px sans-serif";
-  ctx.fillText("480x240 @ 203 DPI (60mm x 30mm)", 40, 150);
+  ctx.fillText(w + "x" + h + " @ 203 DPI", 40, 150);
   return canvas.toDataURL("image/png").split(",")[1];
 }
 
 async function testPrint() {
   const backend = document.querySelector('input[name="backend"]:checked').value;
-  const zpl = "^XA^FO50,50^A0N,40,40^FDReLIMS Test Print^FS^FO50,100^A0N,30,30^FD" + new Date().toLocaleString() + "^FS^XZ";
+  // Fetch config to get calibrated label dimensions
+  let w = 480, h = 240;
+  try {
+    const cr = await fetch(API + "/config");
+    const cfg = await cr.json();
+    if (cfg.label_width > 0) w = cfg.label_width;
+    if (cfg.label_height > 0) h = cfg.label_height;
+  } catch { /* use defaults */ }
+  const wmm = (w / 8).toFixed(1);
+  const hmm = (h / 8).toFixed(1);
+  // Test label sized to calibrated dimensions. ^LH0,0 is the content origin;
+  // apply_zpl_offsets adds the calibrated printhead offset + fine-tune.
+  const zpl = "^XA^PW" + w + "^LL" + h + "^LH0,0" +
+    "^FO0,0^GB" + w + "," + h + ",2^FS" +
+    "^FO15,15^A0N,28,22^FDReLIMS Test Print^FS" +
+    "^FO15,50^A0N,20,16^FD" + new Date().toLocaleString() + "^FS" +
+    "^FO15,80^A0N,16,13^FD" + w + "x" + h + " dots (" + wmm + "x" + hmm + "mm)^FS" +
+    "^FO15,110^A0N,16,13^FDCalibration active^FS" +
+    "^FO15," + (h - 30) + "^A0N,14,11^FDBorder should align with label edges^FS" +
+    "^XZ";
   const body = { zpl };
-  // For CUPS and Windows backends, also send an image so printers with
-  // drivers (e.g., Citizen ctzcls) that don't understand raw ZPL can
-  // receive image data through the driver pipeline instead.
   if (backend === "cups" || backend === "windows") {
-    body.image = generateTestImage();
+    body.image = generateTestImage(w, h);
   }
   try {
     const r = await fetch(API + "/print", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body) });
@@ -212,6 +427,8 @@ async function testPrint() {
     }
   } catch (e) { showMsg("Error: " + e.message, false); }
 }
+
+// ---------- Logs ----------
 
 async function toggleLogs() {
   const box = document.getElementById("logBox");
