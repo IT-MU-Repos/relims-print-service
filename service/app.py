@@ -6,6 +6,7 @@ and sends them to Windows or network printers via ZPL or image data.
 import base64
 import collections
 import logging
+import re
 import sys
 
 from flask import Flask, jsonify, request
@@ -52,6 +53,21 @@ def _setup_logging():
 logger = _setup_logging()
 
 
+def apply_zpl_offsets(zpl):
+    """Inject ^LS (horizontal) and ^LT (vertical) shift commands into ZPL."""
+    cfg = load_config()
+    ox = int(cfg.get("label_offset_x", 0))
+    oy = int(cfg.get("label_offset_y", 0))
+    if ox == 0 and oy == 0:
+        return zpl
+    cmds = ""
+    if ox != 0:
+        cmds += f"^LS{ox}"
+    if oy != 0:
+        cmds += f"^LT{oy}"
+    return re.sub(r'(\^XA)', r'\1' + cmds, zpl, flags=re.IGNORECASE)
+
+
 @app.route("/")
 def index():
     return app.send_static_file("index.html")
@@ -77,14 +93,12 @@ def get_config():
 @app.route("/config", methods=["POST"])
 def update_config():
     data = request.get_json(force=True)
-    allowed = {"printer_name", "printer_host", "printer_port", "backend", "api_port", "timeout"}
+    allowed = {"printer_name", "printer_host", "printer_port", "backend", "api_port", "timeout",
+               "label_offset_x", "label_offset_y"}
     filtered = {k: v for k, v in data.items() if k in allowed}
-    if "printer_port" in filtered:
-        filtered["printer_port"] = int(filtered["printer_port"])
-    if "api_port" in filtered:
-        filtered["api_port"] = int(filtered["api_port"])
-    if "timeout" in filtered:
-        filtered["timeout"] = int(filtered["timeout"])
+    for int_key in ("printer_port", "api_port", "timeout", "label_offset_x", "label_offset_y"):
+        if int_key in filtered:
+            filtered[int_key] = int(filtered[int_key])
     updated = save_config(filtered)
     return jsonify(updated)
 
@@ -110,7 +124,7 @@ def print_label():
     # PrintDocument may "succeed" at the OS/spooler level but produce no
     # output because the ZPL driver cannot render raster data.
     if zpl:
-        result = printer.print_zpl(zpl, copies=copies)
+        result = printer.print_zpl(apply_zpl_offsets(zpl), copies=copies)
         if result["success"] or not image_b64:
             status_code = 200 if result["success"] else 500
             return jsonify(result), status_code
@@ -146,11 +160,12 @@ def print_batch():
 
     # Prefer ZPL batch (same reasoning as /print — ZPL printers need raw commands)
     if zpls:
+        shifted = [apply_zpl_offsets(z) for z in zpls]
         if hasattr(printer, 'print_batch_zpl'):
-            result = printer.print_batch_zpl(zpls, copies_each=copies)
+            result = printer.print_batch_zpl(shifted, copies_each=copies)
         else:
             printed = 0
-            for zpl in zpls:
+            for zpl in shifted:
                 r = printer.print_zpl(zpl, copies=copies)
                 if r["success"]:
                     printed += 1

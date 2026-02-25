@@ -13,6 +13,8 @@ DEFAULT_CONFIG = {
     "backend": _default_backend,
     "api_port": 5577,
     "timeout": 5,
+    "label_offset_x": 0,
+    "label_offset_y": 0,
 }
 
 
