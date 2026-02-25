@@ -242,48 +242,72 @@ async function saveConfig() {
 // ---------- Calibration ----------
 
 async function printCalibration() {
-  // Ruler-style calibration label with tick marks at EXACT positions and
-  // centered labels. ^PW832^LL300 overrides any stored limits.
+  // Calibration label with clear X/Y axis indicators, bold tick marks,
+  // and axis labels. ^PW832^LL300 overrides any stored limits.
   let zpl = "^XA^PW832^LL300^LH0,0";
 
-  // --- X-axis ruler (two rows for readability) ---
-  const xRows = [
-    { tickY: 40, labelY: 72 },   // row 1
-    { tickY: 140, labelY: 172 },  // row 2
-  ];
-  for (const row of xRows) {
-    // Tick marks every 50 dots (tall every 100)
-    for (let x = 0; x <= 830; x += 50) {
-      const tall = x % 100 === 0;
-      const h = tall ? 28 : 16;
-      const y = tall ? row.tickY : row.tickY + 6;
-      zpl += "^FO" + x + "," + y + "^GB2," + h + ",2^FS";
-    }
-    // Labels every 100 dots, centered on tick mark
-    for (let x = 0; x <= 830; x += 100) {
-      const s = String(x);
-      const charW = 14;
-      const labelW = s.length * charW;
-      const lx = Math.max(0, x - Math.floor(labelW / 2));
-      zpl += "^FO" + lx + "," + row.labelY + "^A0N,20," + charW + "^FD" + x + "^FS";
-    }
+  // === X-AXIS RULER (horizontal, centered at y=100) ===
+  const xRulerY = 95;
+
+  // Horizontal baseline spanning full printhead
+  zpl += "^FO0," + xRulerY + "^GB832,3,3^FS";
+
+  // Tick marks: tall every 100, medium every 50, small every 10
+  for (let x = 0; x <= 830; x += 10) {
+    let h, w;
+    if (x % 100 === 0)      { h = 30; w = 3; }
+    else if (x % 50 === 0)  { h = 22; w = 2; }
+    else                     { h = 10; w = 1; }
+    zpl += "^FO" + x + "," + xRulerY + "^GB" + w + "," + h + "," + w + "^FS";
   }
 
-  // --- Y-axis ruler (two columns) ---
-  const yCols = [420, 540];
-  for (const cx of yCols) {
-    // Tick marks every 20 dots (tall every 40)
-    for (let y = 0; y <= 290; y += 20) {
-      const tall = y % 40 === 0;
-      const w = tall ? 24 : 14;
-      zpl += "^FO" + (cx - w) + "," + y + "^GB" + w + ",2,2^FS";
-    }
-    // Labels every 40 dots, to the right of tick
-    for (let y = 0; y <= 290; y += 40) {
-      const ly = Math.max(0, y - 9);
-      zpl += "^FO" + (cx + 4) + "," + ly + "^A0N,18,12^FD" + y + "^FS";
-    }
+  // X-axis number labels every 50, prefixed with "X", centered below tick
+  for (let x = 0; x <= 830; x += 50) {
+    const label = "X" + x;
+    const major = x % 100 === 0;
+    const charW = major ? 12 : 9;
+    const fontH = major ? 22 : 16;
+    const lx = Math.max(0, x - Math.floor(label.length * charW / 2));
+    const ly = xRulerY + (major ? 32 : 24);
+    zpl += "^FO" + lx + "," + ly + "^A0N," + fontH + "," + charW + "^FD" + label + "^FS";
   }
+
+  // === Y-AXIS RULER (vertical, at x=330) ===
+  const yRulerX = 330;
+
+  // Vertical baseline spanning full height
+  zpl += "^FO" + yRulerX + ",0^GB3,300,3^FS";
+
+  // Tick marks: tall every 40, medium every 20, small every 10
+  for (let y = 0; y <= 290; y += 10) {
+    let w, t;
+    if (y % 40 === 0)       { w = 28; t = 3; }
+    else if (y % 20 === 0)  { w = 16; t = 2; }
+    else                     { w = 8;  t = 1; }
+    // Ticks extend RIGHT from the baseline
+    zpl += "^FO" + yRulerX + "," + y + "^GB" + w + "," + t + "," + t + "^FS";
+  }
+
+  // Y-axis number labels every 20, prefixed with "Y", to the right of tick
+  for (let y = 0; y <= 290; y += 20) {
+    const label = "Y" + y;
+    const major = y % 40 === 0;
+    const charH = major ? 20 : 15;
+    const charW = major ? 12 : 9;
+    const ly = Math.max(0, y - Math.floor(charH / 2));
+    const lx = yRulerX + (major ? 32 : 20);
+    zpl += "^FO" + lx + "," + ly + "^A0N," + charH + "," + charW + "^FD" + label + "^FS";
+  }
+
+  // === CORNER MARKERS (L-shapes to mark edges if visible) ===
+  // Top-left corner
+  zpl += "^FO0,0^GB40,3,3^FS^FO0,0^GB3,40,3^FS";
+  // Top-right area (at x=830)
+  zpl += "^FO790,0^GB40,3,3^FS^FO827,0^GB3,40,3^FS";
+  // Bottom-left area (at y=290)
+  zpl += "^FO0,287^GB40,3,3^FS^FO0,250^GB3,40,3^FS";
+  // Bottom-right area
+  zpl += "^FO790,287^GB40,3,3^FS^FO827,250^GB3,40,3^FS";
 
   zpl += "^XZ";
   try {
