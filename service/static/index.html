@@ -82,23 +82,23 @@
       <button class="btn btn-warning btn-sm" onclick="printCalibration()">1. Print Calibration Label</button>
 
       <div id="calForm" class="hidden" style="margin-top:12px">
-        <p class="cal-step"><b>2.</b> Read the numbers from the printed label and enter them below:</p>
+        <p class="cal-step"><b>2.</b> Find the first and last <b>tick marks</b> visible at the label edges and enter their values:</p>
         <div class="cal-inputs">
           <div>
-            <label>First visible X</label>
-            <input type="number" id="calFirstX" placeholder="e.g. 230">
+            <label>First X tick (left edge)</label>
+            <input type="number" id="calFirstX" placeholder="e.g. 200" step="50">
           </div>
           <div>
-            <label>Last visible X</label>
-            <input type="number" id="calLastX" placeholder="e.g. 710">
+            <label>Last X tick (right edge)</label>
+            <input type="number" id="calLastX" placeholder="e.g. 700" step="50">
           </div>
           <div>
-            <label>First visible Y</label>
-            <input type="number" id="calFirstY" placeholder="e.g. 0">
+            <label>First Y tick (top edge)</label>
+            <input type="number" id="calFirstY" placeholder="e.g. 0" step="20">
           </div>
           <div>
-            <label>Last visible Y</label>
-            <input type="number" id="calLastY" placeholder="e.g. 240">
+            <label>Last Y tick (bottom edge)</label>
+            <input type="number" id="calLastY" placeholder="e.g. 240" step="20">
           </div>
         </div>
         <button class="btn btn-primary btn-sm" onclick="applyCalibration()">Apply Calibration</button>
@@ -242,53 +242,50 @@ async function saveConfig() {
 // ---------- Calibration ----------
 
 async function printCalibration() {
-  // Print a label with coordinate markers spanning the full printhead (832 dots)
-  // using ^PW832^LL300 to override any stored limits. Markers every 50 dots on
-  // X (0-800) and every 40 dots on Y (0-280). Sent raw to bypass all offsets.
-  const zpl = "^XA^PW832^LL300^LH0,0" +
-    // X markers row 1 at y=60
-    "^FO0,60^A0N,28,20^FD0^FS" +
-    "^FO50,60^A0N,28,20^FD50^FS" +
-    "^FO100,60^A0N,28,20^FD100^FS" +
-    "^FO150,60^A0N,28,20^FD150^FS" +
-    "^FO200,60^A0N,28,20^FD200^FS" +
-    "^FO250,60^A0N,28,20^FD250^FS" +
-    "^FO300,60^A0N,28,20^FD300^FS" +
-    "^FO350,60^A0N,28,20^FD350^FS" +
-    "^FO400,60^A0N,28,20^FD400^FS" +
-    "^FO450,60^A0N,28,20^FD450^FS" +
-    "^FO500,60^A0N,28,20^FD500^FS" +
-    "^FO550,60^A0N,28,20^FD550^FS" +
-    "^FO600,60^A0N,28,20^FD600^FS" +
-    "^FO650,60^A0N,28,20^FD650^FS" +
-    "^FO700,60^A0N,28,20^FD700^FS" +
-    "^FO750,60^A0N,28,20^FD750^FS" +
-    "^FO800,60^A0N,28,20^FD800^FS" +
-    // X markers row 2 at y=140 (same values, different Y for readability)
-    "^FO0,140^A0N,28,20^FD0^FS" +
-    "^FO100,140^A0N,28,20^FD100^FS" +
-    "^FO200,140^A0N,28,20^FD200^FS" +
-    "^FO300,140^A0N,28,20^FD300^FS" +
-    "^FO400,140^A0N,28,20^FD400^FS" +
-    "^FO500,140^A0N,28,20^FD500^FS" +
-    "^FO600,140^A0N,28,20^FD600^FS" +
-    "^FO700,140^A0N,28,20^FD700^FS" +
-    "^FO800,140^A0N,28,20^FD800^FS" +
-    // Y markers column at x=350
-    "^FO350,0^A0N,28,20^FDy0^FS" +
-    "^FO350,40^A0N,28,20^FDy40^FS" +
-    "^FO350,100^A0N,28,20^FDy100^FS" +
-    "^FO350,180^A0N,28,20^FDy180^FS" +
-    "^FO350,220^A0N,28,20^FDy220^FS" +
-    "^FO350,260^A0N,28,20^FDy260^FS" +
-    // Y markers column at x=500
-    "^FO500,0^A0N,28,20^FDy0^FS" +
-    "^FO500,40^A0N,28,20^FDy40^FS" +
-    "^FO500,100^A0N,28,20^FDy100^FS" +
-    "^FO500,180^A0N,28,20^FDy180^FS" +
-    "^FO500,220^A0N,28,20^FDy220^FS" +
-    "^FO500,260^A0N,28,20^FDy260^FS" +
-    "^XZ";
+  // Ruler-style calibration label with tick marks at EXACT positions and
+  // centered labels. ^PW832^LL300 overrides any stored limits.
+  let zpl = "^XA^PW832^LL300^LH0,0";
+
+  // --- X-axis ruler (two rows for readability) ---
+  const xRows = [
+    { tickY: 40, labelY: 72 },   // row 1
+    { tickY: 140, labelY: 172 },  // row 2
+  ];
+  for (const row of xRows) {
+    // Tick marks every 50 dots (tall every 100)
+    for (let x = 0; x <= 830; x += 50) {
+      const tall = x % 100 === 0;
+      const h = tall ? 28 : 16;
+      const y = tall ? row.tickY : row.tickY + 6;
+      zpl += "^FO" + x + "," + y + "^GB2," + h + ",2^FS";
+    }
+    // Labels every 100 dots, centered on tick mark
+    for (let x = 0; x <= 830; x += 100) {
+      const s = String(x);
+      const charW = 14;
+      const labelW = s.length * charW;
+      const lx = Math.max(0, x - Math.floor(labelW / 2));
+      zpl += "^FO" + lx + "," + row.labelY + "^A0N,20," + charW + "^FD" + x + "^FS";
+    }
+  }
+
+  // --- Y-axis ruler (two columns) ---
+  const yCols = [420, 540];
+  for (const cx of yCols) {
+    // Tick marks every 20 dots (tall every 40)
+    for (let y = 0; y <= 290; y += 20) {
+      const tall = y % 40 === 0;
+      const w = tall ? 24 : 14;
+      zpl += "^FO" + (cx - w) + "," + y + "^GB" + w + ",2,2^FS";
+    }
+    // Labels every 40 dots, to the right of tick
+    for (let y = 0; y <= 290; y += 40) {
+      const ly = Math.max(0, y - 9);
+      zpl += "^FO" + (cx + 4) + "," + ly + "^A0N,18,12^FD" + y + "^FS";
+    }
+  }
+
+  zpl += "^XZ";
   try {
     const r = await fetch(API + "/print", {
       method: "POST",

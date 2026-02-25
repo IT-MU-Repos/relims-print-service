@@ -58,42 +58,56 @@ logger = _setup_logging()
 def apply_zpl_offsets(zpl):
     """Adjust ZPL positioning using calibrated origin + fine-tune offsets.
 
-    Calibrated origin (label_origin_x/y) compensates for the gap between
-    the printhead's coordinate x=0 and the physical label edge. Fine-tune
-    offsets (label_offset_x/y) allow further per-printer adjustment.
+    When calibration is active (label_origin_x/y > 0), REPLACES the ^LH
+    in incoming ZPL with the calibrated label-edge position. This means
+    Django's ^LH140,30 (a guess) gets replaced with the measured position,
+    and all ^FO content positions are preserved relative to the label edge.
 
-    Also overrides ^PW to full printhead width (832 dots) when a calibrated
-    origin is set, preventing the printer's stored print width from clipping.
+    When calibration is NOT active, falls back to additive fine-tune only.
     """
     cfg = load_config()
     origin_x = int(cfg.get("label_origin_x", 0))
     origin_y = int(cfg.get("label_origin_y", 0))
     fine_x = int(cfg.get("label_offset_x", 0))
     fine_y = int(cfg.get("label_offset_y", 0))
-    total_x = origin_x + fine_x
-    total_y = origin_y + fine_y
+    calibrated = origin_x > 0 or origin_y > 0
 
-    if total_x == 0 and total_y == 0 and origin_x == 0:
-        return zpl
+    if calibrated:
+        # REPLACE mode: set ^LH to the calibrated label edge + fine-tune.
+        # This overrides whatever ^LH Django sent (e.g., ^LH140,30) with
+        # the measured printhead-to-label offset.
+        lh_x = max(0, origin_x + fine_x)
+        lh_y = max(0, origin_y + fine_y)
 
-    def adjust_lh(match):
-        x = int(match.group(1)) + total_x
-        y = int(match.group(2)) + total_y
-        return f"^LH{max(0, x)},{max(0, y)}"
+        def replace_lh(match):
+            return f"^LH{lh_x},{lh_y}"
 
-    if re.search(r'\^LH\d+,\d+', zpl, re.IGNORECASE):
-        zpl = re.sub(r'\^LH(\d+),(\d+)', adjust_lh, zpl, flags=re.IGNORECASE)
-    else:
-        lh = f"^LH{max(0, total_x)},{max(0, total_y)}"
-        zpl = re.sub(r'(\^XA)', r'\1' + lh, zpl, flags=re.IGNORECASE)
+        if re.search(r'\^LH\d+,\d+', zpl, re.IGNORECASE):
+            zpl = re.sub(r'\^LH(\d+),(\d+)', replace_lh, zpl, flags=re.IGNORECASE)
+        else:
+            zpl = re.sub(r'(\^XA)', rf'\1^LH{lh_x},{lh_y}', zpl, flags=re.IGNORECASE)
 
-    # Override ^PW to full printhead width when calibrated, so content
-    # shifted by the origin offset isn't clipped by a narrow print width.
-    if origin_x > 0:
+        # Override ^PW to full printhead width so content at the calibrated
+        # offset isn't clipped by the printer's stored print width.
         if re.search(r'\^PW\d+', zpl, re.IGNORECASE):
             zpl = re.sub(r'\^PW\d+', '^PW832', zpl, flags=re.IGNORECASE)
         else:
             zpl = re.sub(r'(\^XA)', r'\1^PW832', zpl, flags=re.IGNORECASE)
+    else:
+        # ADDITIVE mode (no calibration): just add fine-tune to existing ^LH.
+        if fine_x == 0 and fine_y == 0:
+            return zpl
+
+        def adjust_lh(match):
+            x = int(match.group(1)) + fine_x
+            y = int(match.group(2)) + fine_y
+            return f"^LH{max(0, x)},{max(0, y)}"
+
+        if re.search(r'\^LH\d+,\d+', zpl, re.IGNORECASE):
+            zpl = re.sub(r'\^LH(\d+),(\d+)', adjust_lh, zpl, flags=re.IGNORECASE)
+        else:
+            lh = f"^LH{max(0, fine_x)},{max(0, fine_y)}"
+            zpl = re.sub(r'(\^XA)', r'\1' + lh, zpl, flags=re.IGNORECASE)
 
     return zpl
 
