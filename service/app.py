@@ -8,13 +8,14 @@ import collections
 import logging
 import re
 import sys
+import time
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
 from config import load_config, save_config, get_config_path
 from printer import get_printer, WindowsPrinter, HAS_WIN32
-from version import VERSION
+from version import VERSION, COMPONENT
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 CORS(app)
@@ -51,6 +52,8 @@ def _setup_logging():
 
 
 logger = _setup_logging()
+
+_START_TIME = time.time()
 
 
 def apply_zpl_offsets(zpl):
@@ -117,7 +120,28 @@ def index():
 
 @app.route("/status")
 def status():
-    return jsonify({"status": "ok", "version": VERSION, "win32": HAS_WIN32})
+    return jsonify({"status": "ok", "version": VERSION, "win32": HAS_WIN32, "platform": "windows"})
+
+
+@app.route("/health")
+def health():
+    """Rich health check for frontend integrations (see docs/INTEGRATION.md)."""
+    cfg = load_config()
+    backend = cfg.get("backend", "windows")
+    backend_available = HAS_WIN32 if backend == "windows" else True
+    printer_configured = bool(
+        cfg.get("printer_host") if backend == "network" else cfg.get("printer_name")
+    )
+    return jsonify({
+        "service": COMPONENT,
+        "status": "ok" if backend_available and printer_configured else "degraded",
+        "version": VERSION,
+        "platform": "windows",
+        "backend": backend,
+        "backend_available": backend_available,
+        "printer_configured": printer_configured,
+        "uptime_seconds": int(time.time() - _START_TIME),
+    })
 
 
 @app.route("/printers")

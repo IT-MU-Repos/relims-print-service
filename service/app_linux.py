@@ -10,13 +10,14 @@ import logging
 import re
 import signal
 import sys
+import time
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
 from config import load_config, save_config, get_config_path
 from printer_linux import get_printer, CUPSPrinter, HAS_CUPS
-from version import VERSION
+from version import VERSION, COMPONENT
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 CORS(app)
@@ -53,6 +54,8 @@ def _setup_logging():
 
 
 logger = _setup_logging()
+
+_START_TIME = time.time()
 
 
 def apply_zpl_offsets(zpl):
@@ -120,6 +123,27 @@ def index():
 @app.route("/status")
 def status():
     return jsonify({"status": "ok", "version": VERSION, "cups": HAS_CUPS, "platform": "linux"})
+
+
+@app.route("/health")
+def health():
+    """Rich health check for frontend integrations (see docs/INTEGRATION.md)."""
+    cfg = load_config()
+    backend = cfg.get("backend", "cups")
+    backend_available = HAS_CUPS if backend == "cups" else True
+    printer_configured = bool(
+        cfg.get("printer_host") if backend == "network" else cfg.get("printer_name")
+    )
+    return jsonify({
+        "service": COMPONENT,
+        "status": "ok" if backend_available and printer_configured else "degraded",
+        "version": VERSION,
+        "platform": "linux",
+        "backend": backend,
+        "backend_available": backend_available,
+        "printer_configured": printer_configured,
+        "uptime_seconds": int(time.time() - _START_TIME),
+    })
 
 
 @app.route("/printers")

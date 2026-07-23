@@ -14,10 +14,13 @@ ReLIMS Print Manager (system tray app)
   │
   v
 ReLIMS Print Service (headless Flask daemon on localhost:5577)
-  ├── /print   — Send ZPL to printer
-  ├── /status  — Health check + version
-  ├── /config  — Get/set configuration
-  └── /printers — List available printers
+  ├── /print       — Send ZPL to printer
+  ├── /print-batch — Send many labels in one job
+  ├── /health      — Rich health check (identity, version, printer state)
+  ├── /status      — Legacy health check + version
+  ├── /config      — Get/set configuration
+  ├── /printers    — List available printers
+  └── /logs        — Recent service log lines
 ```
 
 ## Installation
@@ -68,13 +71,20 @@ Service-only updates apply instantly (the service restarts in seconds). Full upd
 
 The print service runs on `http://localhost:5577`.
 
+> Integrating from another web app? See **[docs/INTEGRATION.md](docs/INTEGRATION.md)** for
+> the full contract, detection patterns, and copy-paste client code.
+
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/status` | GET | Health check: `{"status": "ok", "version": "2.0.0"}` |
+| `/health` | GET | Rich health check (v2.0.12+): `{"service": "relims-print-service", "status": "ok"\|"degraded", "version", "platform", "backend", "backend_available", "printer_configured", "uptime_seconds"}` |
+| `/status` | GET | Legacy health check (kept stable): `{"status": "ok", "version": "...", "platform": "windows"\|"linux", "win32"\|"cups": bool}` |
 | `/printers` | GET | List available printers |
 | `/config` | GET | Get current configuration |
 | `/config` | POST | Update configuration (partial updates) |
-| `/print` | POST | Send ZPL to printer |
+| `/print` | POST | Send ZPL (and/or base64 image) to printer |
+| `/print-batch` | POST | Send multiple labels in a single job |
+| `/logs` | GET | Last 200 log lines (debugging) |
+| `/` | GET | Printer configuration UI |
 
 ### Print Example
 
@@ -98,6 +108,9 @@ Config is stored at:
 | `printer_port` | `9100` | TCP port (for network backend) |
 | `api_port` | `5577` | Port the service listens on |
 | `timeout` | `5` | Socket timeout in seconds |
+| `label_offset_x` / `label_offset_y` | `0` | Fine-tune print position offsets (dots) |
+| `label_origin_x` / `label_origin_y` | `0` | Calibrated label origin (dots); when set, replaces incoming `^LH` |
+| `label_width` / `label_height` | `0` | Label dimensions used by calibration |
 
 ## Development
 
@@ -155,6 +168,9 @@ print-service/
 │   ├── self_update.py        # Self-updater helper script
 │   ├── installer.iss         # Inno Setup installer (Windows)
 │   └── linux_installer_header.sh  # Self-extracting installer (Linux)
+│
+├── docs/
+│   └── INTEGRATION.md        # Web-app integration guide (health check, printing)
 │
 ├── .github/workflows/build.yml  # CI/CD pipeline
 ├── requirements.txt          # Service dependencies
