@@ -194,16 +194,32 @@ pyinstaller build/build_manager_linux.spec   # Linux
 pyinstaller build/build_self_updater.spec
 ```
 
-### CI/CD
+### Cutting a release
 
-Push a version tag to trigger automated builds:
+**Bumping the version is the release action.** In your PR, set the same new version in
+**both** files:
 
-```bash
-git tag v2.1.0
-git push origin v2.1.0
+```python
+# service/version.py  AND  manager/version.py
+VERSION = "2.1.0"
 ```
 
-The GitHub Actions workflow builds all binaries, creates the Windows installer, generates `manifest.json`, and publishes a GitHub Release with all artifacts.
+Merge to `main` and CI does the rest: it builds all binaries, creates the Windows
+installer, generates `manifest.json`, tags `v2.1.0` at the merge commit, and publishes a
+GitHub Release with all artifacts. The Mµle **Tools → Print service** page picks it up
+within ~5 minutes, and installed agents start offering the update on their next hourly
+check.
+
+Both files must match — CI fails fast if they drift. The update check compares the release
+tag against the **manager** version (`manager/updater.py`), so bumping only the service
+would ship an update nobody is ever offered.
+
+A merge that doesn't change the version runs a ~10s check and stops — no build, no
+duplicate release. The same applies to re-running an old commit.
+
+Pushing a `v*` tag by hand still works and takes precedence over the source version. To
+rebuild and replace the assets of a version that is *already* released, run the workflow
+manually from the Actions tab with **force** ticked.
 
 ## Uninstalling
 

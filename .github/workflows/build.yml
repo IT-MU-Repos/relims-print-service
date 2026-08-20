@@ -2,16 +2,107 @@ name: Build Print Manager
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      force:
+        description: "Rebuild and replace assets even if this version is already released"
+        type: boolean
+        default: false
+
+# NOTE: deliberately no `paths:` filter. Under `push`, a paths filter applies to
+# tag pushes as well, which would silently stop manual re-cuts from building.
+# The `version` job below gates instead — it skips everything when the version
+# in service/version.py already has a release, so ordinary merges cost ~10s.
 
 env:
   PYTHON_VERSION: "3.11"
 
 jobs:
+  version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      should_release: ${{ steps.resolve.outputs.should_release }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version from source (or tag)
+        id: resolve
+        shell: bash
+        env:
+          FORCE: ${{ inputs.force && 'true' || 'false' }}
+        run: |
+          set -euo pipefail
+
+          extract() { sed -n 's/^VERSION = "\(.*\)"$/\1/p' "$1" | head -1; }
+          service_version="$(extract service/version.py)"
+          manager_version="$(extract manager/version.py)"
+
+          if [[ -z "$service_version" ]]; then
+            echo "::error file=service/version.py::Could not parse VERSION"
+            exit 1
+          fi
+
+          # Both must agree. manager/updater.py compares the release tag against
+          # the MANAGER version, so a half-bump ships an update nobody is offered.
+          if [[ "$service_version" != "$manager_version" ]]; then
+            echo "::error::Version mismatch — service/version.py is '$service_version' but manager/version.py is '$manager_version'. Bump both."
+            exit 1
+          fi
+
+          # A tag push still wins, so manual re-cuts behave exactly as before.
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" == v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+            echo "Tag push — using tag version $version (source says $service_version)"
+          else
+            version="$service_version"
+            echo "Branch push — using source version $version"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          code="$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/v${version}")"
+
+          if [[ "$code" == "200" && "$FORCE" == "true" ]]; then
+            echo "v$version is already released, but force was requested — rebuilding."
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          elif [[ "$code" == "200" ]]; then
+            echo "v$version is already released — nothing to do."
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          elif [[ "$code" == "404" ]]; then
+            echo "v$version has no release yet — building."
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::Unexpected HTTP $code checking for an existing release of v$version"
+            exit 1
+          fi
+
+      - name: Summary
+        shell: bash
+        run: |
+          {
+            echo "### Print Service ${{ steps.resolve.outputs.version }}"
+            if [[ "${{ steps.resolve.outputs.should_release }}" == "true" ]]; then
+              echo "Building and releasing \`v${{ steps.resolve.outputs.version }}\`."
+            else
+              echo "\`v${{ steps.resolve.outputs.version }}\` is already released — build skipped."
+              echo ""
+              echo "Bump \`service/version.py\` **and** \`manager/version.py\` to cut a new release."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
   build-windows:
     name: Build Windows binaries
+    needs: version
+    if: needs.version.outputs.should_release == 'true'
     runs-on: windows-latest
 
     steps:
@@ -22,15 +113,10 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Extract version from tag
+      - name: Resolve version
         id: version
         shell: bash
-        run: |
-          if [[ "$GITHUB_REF_NAME" == v* ]]; then
-            echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
-          else
-            echo "version=0.0.0-dev" >> $GITHUB_OUTPUT
-          fi
+        run: echo "version=${{ needs.version.outputs.version }}" >> $GITHUB_OUTPUT
 
       - name: Patch version files
         shell: python
@@ -71,21 +157,17 @@ jobs:
 
   build-windows-installer:
     name: Build Windows installer
-    needs: build-windows
+    needs: [version, build-windows]
+    if: needs.version.outputs.should_release == 'true'
     runs-on: windows-latest
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Extract version from tag
+      - name: Resolve version
         id: version
         shell: bash
-        run: |
-          if [[ "$GITHUB_REF_NAME" == v* ]]; then
-            echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
-          else
-            echo "version=0.0.0-dev" >> $GITHUB_OUTPUT
-          fi
+        run: echo "version=${{ needs.version.outputs.version }}" >> $GITHUB_OUTPUT
 
       - name: Download Windows binaries
         uses: actions/download-artifact@v4
@@ -107,6 +189,8 @@ jobs:
 
   build-linux:
     name: Build Linux binaries
+    needs: version
+    if: needs.version.outputs.should_release == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -117,15 +201,10 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Extract version from tag
+      - name: Resolve version
         id: version
         shell: bash
-        run: |
-          if [[ "$GITHUB_REF_NAME" == v* ]]; then
-            echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
-          else
-            echo "version=0.0.0-dev" >> $GITHUB_OUTPUT
-          fi
+        run: echo "version=${{ needs.version.outputs.version }}" >> $GITHUB_OUTPUT
 
       - name: Patch version files
         run: |
@@ -189,16 +268,16 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: [build-windows, build-windows-installer, build-linux]
-    if: startsWith(github.ref, 'refs/tags/')
+    needs: [version, build-windows, build-windows-installer, build-linux]
+    if: needs.version.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
-      - name: Extract version
+      - name: Resolve version
         id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+        run: echo "version=${{ needs.version.outputs.version }}" >> $GITHUB_OUTPUT
 
       - name: Download Windows binaries
         uses: actions/download-artifact@v4
@@ -239,6 +318,10 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          # Explicit tag_name so a branch push can release too — the action
+          # creates the tag at this commit when it doesn't already exist.
+          tag_name: v${{ steps.version.outputs.version }}
+          name: v${{ steps.version.outputs.version }}
           files: |
             artifacts/relims-print-service.exe
             artifacts/relims-print-service-linux.tar.gz
