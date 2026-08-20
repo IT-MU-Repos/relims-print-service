@@ -81,7 +81,7 @@ The print service runs on `http://localhost:5577`.
 | `/printers` | GET | List available printers |
 | `/config` | GET | Get current configuration |
 | `/config` | POST | Update configuration (partial updates) |
-| `/print` | POST | Send ZPL (and/or base64 image) to printer |
+| `/print` | POST | Send ZPL (and/or base64 image) to printer. Optional `"raw": true` (skip calibration offsets) and `"reset_printer": true` (recall factory settings + re-calibrate media first) |
 | `/print-batch` | POST | Send multiple labels in a single job |
 | `/logs` | GET | Last 200 log lines (debugging) |
 | `/` | GET | Printer configuration UI |

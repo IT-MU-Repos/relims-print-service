@@ -55,6 +55,29 @@ logger = _setup_logging()
 
 _START_TIME = time.time()
 
+# Recall factory settings (^JUF — active only, never saved, so a power cycle
+# restores the printer's own config) then re-run media calibration (~JC), which
+# ^JUF discards along with the learned label length. Mirrors the legacy VB pair
+# RestoreDefaults() + Calibrate() in LIMS_App/DarkerPrint.vb.
+PRINTER_RESET_ZPL = "^XA^JUF^XZ~JC"
+PRINTER_RESET_SETTLE_SECONDS = 2.0
+
+
+def reset_printer_defaults(printer):
+    """Send a factory-recall + media-calibration job and wait for it to settle.
+
+    Sent as its own job rather than glued onto the caller's ZPL so the media
+    feed finishes before the next label renders — the same reason the legacy
+    app slept 2s after resetting.
+    """
+    result = printer.print_zpl(PRINTER_RESET_ZPL, copies=1)
+    if not result.get("success"):
+        logger.warning("Printer reset failed: %s", result.get("error"))
+        return result
+    logger.info("Printer reset to factory defaults + media calibration")
+    time.sleep(PRINTER_RESET_SETTLE_SECONDS)
+    return result
+
 
 def apply_zpl_offsets(zpl):
     """Adjust ZPL positioning using calibrated origin + fine-tune offsets.
@@ -179,20 +202,27 @@ def print_label():
     if not zpl and not image_b64:
         return jsonify({"success": False, "error": "No ZPL or image data provided"}), 400
     copies = max(1, int(data.get("copies", 1)))
+    raw = data.get("raw", False)
+    reset_printer = data.get("reset_printer", False)
     try:
         printer = get_printer()
     except RuntimeError as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
-    logger.info("/print request: copies=%d, has_image=%s, has_zpl=%s",
-                copies, bool(image_b64), bool(zpl))
+    logger.info("/print request: copies=%d, has_image=%s, has_zpl=%s, raw=%s, reset=%s",
+                copies, bool(image_b64), bool(zpl), raw, reset_printer)
 
     # Prefer ZPL when available — ZPL printers (e.g. Zebra ZD220) need raw
     # ZPL commands via win32print RAW.  Image printing via PowerShell
     # PrintDocument may "succeed" at the OS/spooler level but produce no
     # output because the ZPL driver cannot render raster data.
     if zpl:
-        result = printer.print_zpl(apply_zpl_offsets(zpl), copies=copies)
+        # A failed reset is logged but does not block the print — a non-Zebra
+        # unit that rejects ^JUF should still be able to print.
+        if reset_printer:
+            reset_printer_defaults(printer)
+        final_zpl = zpl if raw else apply_zpl_offsets(zpl)
+        result = printer.print_zpl(final_zpl, copies=copies)
         if result["success"] or not image_b64:
             status_code = 200 if result["success"] else 500
             return jsonify(result), status_code

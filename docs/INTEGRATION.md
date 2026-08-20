@@ -173,7 +173,18 @@ picks the best format for the configured printer (ZPL preferred for ZPL-capable 
 { "zpl": "^XA^FO50,50^A0N,40,40^FDHello^FS^XZ", "image": "<base64 PNG>", "copies": 1 }
 ```
 
-Linux only: add `"raw": true` to bypass the service's label-calibration offsets.
+Two optional flags, both honoured on Windows and Linux since v2.0.13 (`raw` was
+Linux-only before that):
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `"raw": true` | `false` | Send the ZPL untouched — bypasses the service's stored label-calibration offsets (`^LH` / `^PW` rewriting). |
+| `"reset_printer": true` | `false` | Before printing, send `^XA^JUF^XZ~JC` as its own job and wait ~2s: recalls the printer's factory settings and re-runs media calibration. Not saved to the printer, so a power cycle restores its own config. |
+
+`reset_printer` exists for the built-in calibration flow, which must measure against a
+clean printer state. Do not set it on ordinary label jobs — it discards any darkness or
+speed the lab tuned on the front panel and adds a media feed to every print. A reset that
+the printer rejects is logged and the label still prints.
 
 Responses: `200` `{"success": true, "copies": 1, "printer": "..."}` on success
 (`printer` present for Windows/CUPS backends); `400`/`500`
