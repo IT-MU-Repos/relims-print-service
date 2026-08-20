@@ -76,6 +76,7 @@
     <div class="section">
       <label style="margin-top:0">Label Calibration <span id="calBadge" class="cal-badge unset">Not calibrated</span></label>
       <p class="cal-step">Calibration maps the printer's coordinate system to your physical label stock.</p>
+      <p class="cal-step">Printing the calibration label first recalls the printer's <b>factory settings</b> and re-runs media calibration, so the ruler is measured against a clean baseline. Any darkness or speed set on the printer's front panel is recalled to factory for this session (a power cycle restores it). Normal label printing is unaffected.</p>
 
       <div id="calStatus" class="cal-info"></div>
 
@@ -314,11 +315,11 @@ async function printCalibration() {
     const r = await fetch(API + "/print", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ zpl, raw: true })
+      body: JSON.stringify({ zpl, raw: true, reset_printer: true })
     });
     const d = await r.json();
     if (d.success) {
-      showMsg("Calibration label sent to printer", true);
+      showMsg("Printer reset and calibration label sent", true);
       document.getElementById("calForm").className = "";
     } else {
       showMsg("Print failed: " + (d.error || "Unknown"), false);
