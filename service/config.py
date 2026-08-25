@@ -19,6 +19,7 @@ DEFAULT_CONFIG = {
     "label_origin_y": 0,
     "label_width": 0,
     "label_height": 0,
+    "label_darkness": 0,
 }
 
 

@@ -42,6 +42,11 @@
     .cal-step { font-size: 13px; color: #555; margin: 8px 0; line-height: 1.5; }
     .cal-step b { color: #333; }
     .cal-info { font-size: 12px; color: #888; margin-top: 4px; }
+    input[type="range"] { flex: 1; accent-color: #2563eb; }
+    .dark-row { display: flex; align-items: center; gap: 12px; margin-top: 8px; }
+    .dark-end { font-size: 12px; color: #888; white-space: nowrap; }
+    .dark-badge { display: inline-block; min-width: 44px; padding: 3px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; text-align: center; font-variant-numeric: tabular-nums; background: #f3f4f6; color: #6b7280; }
+    .dark-badge.set { background: #dbeafe; color: #1d4ed8; }
   </style>
 </head>
 <body>
@@ -123,6 +128,21 @@
       </div>
     </div>
 
+    <!-- Print Darkness Section -->
+    <div class="section">
+      <label style="margin-top:0">Print Darkness <span id="darknessValue" class="dark-badge">0</span></label>
+      <p style="font-size:12px;color:#888;margin-bottom:12px">
+        Adjusts contrast relative to the printer's own darkness setting &mdash; <b>0</b> leaves the printer untouched.
+        Applies to the whole label including barcodes, so very dark settings can smear thin bars. ZPL printing only.
+      </p>
+      <div class="dark-row">
+        <span class="dark-end">Brighter</span>
+        <input type="range" id="labelDarkness" min="-30" max="30" step="1" value="0" oninput="updateDarknessValue()">
+        <span class="dark-end">Darker</span>
+      </div>
+      <button class="btn btn-secondary btn-sm" onclick="resetDarkness()">Reset to 0</button>
+    </div>
+
     <div class="section">
       <button class="btn btn-primary" onclick="saveConfig()">Save</button>
       <button class="btn btn-secondary" onclick="testPrint()">Test Print</button>
@@ -186,6 +206,8 @@ async function loadConfig() {
     document.getElementById("printerPort").value = c.printer_port || 9100;
     document.getElementById("labelOffsetX").value = c.label_offset_x || 0;
     document.getElementById("labelOffsetY").value = c.label_offset_y || 0;
+    document.getElementById("labelDarkness").value = c.label_darkness || 0;
+    updateDarknessValue();
     toggleBackend();
     await loadPrinters();
     if (c.printer_name) document.getElementById("printerName").value = c.printer_name;
@@ -213,6 +235,23 @@ function updateCalibrationDisplay(cfg) {
   }
 }
 
+// ---------- Print Darkness ----------
+
+function updateDarknessValue() {
+  const v = parseInt(document.getElementById("labelDarkness").value) || 0;
+  const badge = document.getElementById("darknessValue");
+  // Explicit + so the sign reads as a direction, not a minus-or-nothing.
+  badge.textContent = v > 0 ? "+" + v : String(v);
+  badge.className = "dark-badge" + (v !== 0 ? " set" : "");
+}
+
+// Resets the control only — the user still presses Save, matching how the
+// fine-tune offset fields behave.
+function resetDarkness() {
+  document.getElementById("labelDarkness").value = 0;
+  updateDarknessValue();
+}
+
 function toggleBackend() {
   const backend = document.querySelector('input[name="backend"]:checked').value;
   const isNet = backend === "network";
@@ -233,6 +272,7 @@ async function saveConfig() {
   }
   body.label_offset_x = parseInt(document.getElementById("labelOffsetX").value) || 0;
   body.label_offset_y = parseInt(document.getElementById("labelOffsetY").value) || 0;
+  body.label_darkness = parseInt(document.getElementById("labelDarkness").value) || 0;
   try {
     const r = await fetch(API + "/config", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body) });
     if (r.ok) showMsg("Configuration saved", true);

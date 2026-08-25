@@ -178,13 +178,22 @@ Linux-only before that):
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `"raw": true` | `false` | Send the ZPL untouched — bypasses the service's stored label-calibration offsets (`^LH` / `^PW` rewriting). |
+| `"raw": true` | `false` | Send the ZPL untouched — bypasses the service's stored label-calibration offsets (`^LH` / `^PW` rewriting) **and** its print-darkness setting (`^MD` injection). |
 | `"reset_printer": true` | `false` | Before printing, send `^XA^JUF^XZ~JC` as its own job and wait ~2s: recalls the printer's factory settings and re-runs media calibration. Not saved to the printer, so a power cycle restores its own config. |
 
 `reset_printer` exists for the built-in calibration flow, which must measure against a
 clean printer state. Do not set it on ordinary label jobs — it discards any darkness or
 speed the lab tuned on the front panel and adds a media feed to every print. A reset that
 the printer rejects is logged and the label still prints.
+
+**Darkness is handled by the service, not the caller.** Each workstation's
+`label_darkness` config (`-30`…`30`, set on the settings page) is injected as `^MD` into
+every non-`raw` label. Do not emit your own `^MD` — the service strips it before adding
+its own, because Zebra treats multiple `^MD` commands in one format as cumulative. Unlike
+`reset_printer`, this setting survives a printer reset, so it is the right place to fix
+labels that print too faint. Note it is label-global (barcodes darken along with text) and
+applies to ZPL only — image payloads are rasterized by the OS driver, which the service
+does not control.
 
 Responses: `200` `{"success": true, "copies": 1, "printer": "..."}` on success
 (`printer` present for Windows/CUPS backends); `400`/`500`

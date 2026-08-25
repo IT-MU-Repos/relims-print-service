@@ -111,6 +111,7 @@ Config is stored at:
 | `label_offset_x` / `label_offset_y` | `0` | Fine-tune print position offsets (dots) |
 | `label_origin_x` / `label_origin_y` | `0` | Calibrated label origin (dots); when set, replaces incoming `^LH` |
 | `label_width` / `label_height` | `0` | Label dimensions used by calibration |
+| `label_darkness` | `0` | Print darkness, `-30`…`30`. Injected as `^MD`, which is **relative** to the printer's own darkness — `0` emits nothing and leaves the printer untouched. Negative is brighter, positive is darker. Label-global (affects barcodes too) and ZPL-only. |
 
 ## Development
 

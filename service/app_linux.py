@@ -64,6 +64,12 @@ _START_TIME = time.time()
 PRINTER_RESET_ZPL = "^XA^JUF^XZ~JC"
 PRINTER_RESET_SETTLE_SECONDS = 2.0
 
+# ^MD is a RELATIVE darkness adjustment layered on the printer's own setting
+# (~SD / front panel), so 0 means "leave the printer alone". Zebra's documented
+# range is -30..+30.
+DARKNESS_MIN = -30
+DARKNESS_MAX = 30
+
 
 def reset_printer_defaults(printer):
     """Send a factory-recall + media-calibration job and wait for it to settle.
@@ -138,6 +144,43 @@ def apply_zpl_offsets(zpl):
     return zpl
 
 
+def apply_zpl_darkness(zpl):
+    """Inject ^MD<n> so labels print lighter (negative) or darker (positive).
+
+    ^MD is relative to the printer's own darkness (~SD / front panel), so a
+    configured 0 emits nothing at all and leaves the outgoing ZPL byte-identical
+    to what an unconfigured service would send.
+
+    Darkness is label-global — it affects barcodes and graphics along with text.
+    ZPL has no text-only darkness; the Django renderer's `bold` double-strike is
+    the closest equivalent for text alone.
+    """
+    cfg = load_config()
+    try:
+        darkness = int(cfg.get("label_darkness", 0))
+    except (TypeError, ValueError):
+        return zpl
+    # Clamp rather than reject, so a hand-edited config.json can never produce
+    # out-of-range ZPL.
+    darkness = max(DARKNESS_MIN, min(DARKNESS_MAX, darkness))
+    if darkness == 0:
+        return zpl
+    # Strip any ^MD already present — Zebra treats multiple ^MD commands within
+    # one format as CUMULATIVE, so layering ours on top would compound.
+    zpl = re.sub(r'\^MD-?\d+', '', zpl, flags=re.IGNORECASE)
+    # Unbounded: one ^MD per format, so a multi-format payload is covered too.
+    return re.sub(r'(\^XA)', rf'\1^MD{darkness}', zpl, flags=re.IGNORECASE)
+
+
+def prepare_zpl(zpl):
+    """Apply every outbound ZPL transform: position first, then darkness.
+
+    Darkness is deliberately NOT folded into apply_zpl_offsets — that function
+    returns early when no fine-tune is set, which would skip darkness entirely.
+    """
+    return apply_zpl_darkness(apply_zpl_offsets(zpl))
+
+
 @app.route("/")
 def index():
     return app.send_static_file("index.html")
@@ -186,10 +229,12 @@ def update_config():
     data = request.get_json(force=True)
     allowed = {"printer_name", "printer_host", "printer_port", "backend", "api_port", "timeout",
                "label_offset_x", "label_offset_y",
-               "label_origin_x", "label_origin_y", "label_width", "label_height"}
+               "label_origin_x", "label_origin_y", "label_width", "label_height",
+               "label_darkness"}
     filtered = {k: v for k, v in data.items() if k in allowed}
     for int_key in ("printer_port", "api_port", "timeout", "label_offset_x", "label_offset_y",
-                    "label_origin_x", "label_origin_y", "label_width", "label_height"):
+                    "label_origin_x", "label_origin_y", "label_width", "label_height",
+                    "label_darkness"):
         if int_key in filtered:
             filtered[int_key] = int(filtered[int_key])
     updated = save_config(filtered)
@@ -220,7 +265,7 @@ def print_label():
         # unit that rejects ^JUF should still be able to print.
         if reset_printer:
             reset_printer_defaults(printer)
-        final_zpl = zpl if raw else apply_zpl_offsets(zpl)
+        final_zpl = zpl if raw else prepare_zpl(zpl)
         result = printer.print_zpl(final_zpl, copies=copies)
         if result["success"] or not image_b64:
             status_code = 200 if result["success"] else 500
@@ -257,7 +302,7 @@ def print_batch():
 
     # Prefer ZPL batch
     if zpls:
-        shifted = [apply_zpl_offsets(z) for z in zpls]
+        shifted = [prepare_zpl(z) for z in zpls]
         if hasattr(printer, 'print_batch_zpl'):
             result = printer.print_batch_zpl(shifted, copies_each=copies)
         else:
