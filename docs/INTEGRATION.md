@@ -31,6 +31,7 @@ a system tray manager keeps it running and auto-updates it hourly.
 | `/config` | POST | Partial config update, returns updated config |
 | `/print` | POST | Print one label — see [Printing](#printing) |
 | `/print-batch` | POST | Print many labels in one job — see [Printing](#printing) |
+| `/reset-printer` | POST | Recall factory settings + re-run media calibration (v2.0.16+). No body |
 | `/logs` | GET | Last 200 log lines: `{"lines": ["..."]}` |
 | `/` | GET | Built-in printer configuration UI (link users here to set up their printer) |
 
@@ -181,10 +182,14 @@ Linux-only before that):
 | `"raw": true` | `false` | Send the ZPL untouched — bypasses the service's stored label-calibration offsets (`^LH` / `^PW` rewriting) **and** its print-darkness setting (`^MD` injection). |
 | `"reset_printer": true` | `false` | Before printing, send `^XA^JUF^XZ~JC` as its own job and wait ~2s: recalls the printer's factory settings and re-runs media calibration. Not saved to the printer, so a power cycle restores its own config. |
 
-`reset_printer` exists for the built-in calibration flow, which must measure against a
-clean printer state. Do not set it on ordinary label jobs — it discards any darkness or
-speed the lab tuned on the front panel and adds a media feed to every print. A reset that
-the printer rejects is logged and the label still prints.
+`reset_printer` is retained for compatibility but is **not used by the built-in
+calibration flow any more** — printing the calibration label no longer touches the
+printer. Resetting is its own explicit action: `POST /reset-printer` (no body), exposed
+as **Reset Printer Settings** on the settings page. Prefer that endpoint over the flag.
+
+Do not set `reset_printer` on ordinary label jobs — it discards any darkness or speed the
+lab tuned on the front panel and adds a media feed to every print. A reset that the
+printer rejects is logged and the label still prints.
 
 **Darkness is handled by the service, not the caller.** Each workstation's
 `label_darkness` config (`-30`…`30`, set on the settings page) is injected as `^MD` into

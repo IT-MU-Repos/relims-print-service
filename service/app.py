@@ -243,6 +243,29 @@ def update_config():
     return jsonify(updated)
 
 
+@app.route("/reset-printer", methods=["POST"])
+def reset_printer_settings():
+    """Recall the printer's factory settings and re-run media calibration.
+
+    Its own deliberate action rather than a side effect of printing. It used to
+    be bolted onto the calibration label via the `reset_printer` flag, so anyone
+    measuring the ruler silently lost the darkness and speed the lab had dialled
+    in on the printer's front panel. Those are now separate choices.
+
+    ^JUF recalls the active configuration only — never saved — so a power cycle
+    restores whatever the printer had.
+    """
+    try:
+        printer = get_printer()
+    except RuntimeError as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+    logger.info("/reset-printer request")
+    result = reset_printer_defaults(printer)
+    status_code = 200 if result.get("success") else 500
+    return jsonify(result), status_code
+
+
 @app.route("/print", methods=["POST"])
 def print_label():
     data = request.get_json(force=True)

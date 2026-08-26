@@ -82,7 +82,7 @@
     <div class="section">
       <label style="margin-top:0">Label Calibration <span id="calBadge" class="cal-badge unset">Not calibrated</span></label>
       <p class="cal-step">Calibration maps the printer's coordinate system to your physical label stock.</p>
-      <p class="cal-step">Printing the calibration label first recalls the printer's <b>factory settings</b> and re-runs media calibration, so the ruler is measured against a clean baseline. Any darkness or speed set on the printer's front panel is recalled to factory for this session (a power cycle restores it). Normal label printing is unaffected.</p>
+      <p class="cal-step">The calibration label prints exactly as-is and <b>leaves your printer settings alone</b> &mdash; any darkness or speed set on the front panel is kept. If the ruler looks wrong because the printer itself is misconfigured, use <b>Reset Printer Settings</b> below first, then calibrate.</p>
 
       <div id="calStatus" class="cal-info"></div>
 
@@ -142,6 +142,21 @@
         <span class="dark-end">Darker</span>
       </div>
       <button class="btn btn-secondary btn-sm" onclick="resetDarkness()">Reset to 0</button>
+    </div>
+
+    <!-- Printer Reset Section -->
+    <div class="section">
+      <label style="margin-top:0">Reset Printer Settings</label>
+      <p style="font-size:12px;color:#888;margin-bottom:12px">
+        Recalls the printer's <b>factory settings</b> and re-runs media calibration.
+        This discards any darkness or speed set on the printer's <b>front panel</b>, and
+        feeds a few labels while it measures. A power cycle restores the printer's own
+        config &mdash; the reset is not saved to it.
+        <br>
+        Your saved settings on this page (calibration offsets and print darkness) are
+        <b>not</b> affected &mdash; the service re-applies those to every label.
+      </p>
+      <button id="btnResetPrinter" class="btn btn-warning btn-sm" onclick="withPrintLock(resetPrinterSettings)">Reset Printer Settings</button>
     </div>
 
     <div class="section">
@@ -292,7 +307,7 @@ let printBusy = false;
 async function withPrintLock(fn) {
   if (printBusy) return;
   printBusy = true;
-  const btns = ["btnCalibrate", "btnTestPrint"]
+  const btns = ["btnCalibrate", "btnTestPrint", "btnResetPrinter"]
     .map(id => document.getElementById(id))
     .filter(Boolean);
   btns.forEach(b => { b.disabled = true; });
@@ -302,6 +317,24 @@ async function withPrintLock(fn) {
     printBusy = false;
     btns.forEach(b => { b.disabled = false; });
   }
+}
+
+// ---------- Printer reset ----------
+
+// Deliberately separate from calibration. Folding it into the calibration label
+// meant anyone measuring the ruler silently lost the front-panel darkness and
+// speed the lab had tuned.
+async function resetPrinterSettings() {
+  if (!confirm("Reset the printer to factory settings?\n\nThis discards any darkness or speed set on the printer's front panel and feeds a few labels while it re-calibrates the media.\n\nYour saved settings on this page are not affected.")) return;
+  try {
+    const r = await fetch(API + "/reset-printer", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"}
+    });
+    const d = await r.json();
+    if (d.success) showMsg("Printer reset to factory defaults and media re-calibrated", true);
+    else showMsg("Reset failed: " + (d.error || "Unknown error"), false);
+  } catch (e) { showMsg("Error: " + e.message, false); }
 }
 
 // ---------- Calibration ----------
@@ -379,11 +412,11 @@ async function printCalibration() {
     const r = await fetch(API + "/print", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ zpl, raw: true, reset_printer: true })
+      body: JSON.stringify({ zpl, raw: true })
     });
     const d = await r.json();
     if (d.success) {
-      showMsg("Printer reset and calibration label sent", true);
+      showMsg("Calibration label sent", true);
       document.getElementById("calForm").className = "";
     } else {
       showMsg("Print failed: " + (d.error || "Unknown"), false);
