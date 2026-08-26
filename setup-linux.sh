@@ -57,6 +57,41 @@ if ! python3 -c "import gi; gi.require_version('Gtk', '3.0')" 2>/dev/null; then
     echo "Install with: sudo apt install python3-gi gir1.2-gtk-3.0 gir1.2-appindicator3-0.1"
 fi
 
+# Install the CUPS USB quirk for Citizen label printers. Kept in step with
+# build/linux_installer_header.sh — see the longer note there. Without it the
+# CUPS usb backend blocks ~8s after every job waiting on a back-channel read
+# the CL-E321 never answers. Best-effort; never fatal.
+QUIRK_FILE="/usr/share/cups/usb/net.labserve.relims.usb-quirks"
+QUIRK_LINE="0x1d90 0x20f9 unidir"
+
+install_usb_quirk() {
+    [ -d /usr/share/cups/usb ] || return 0
+    if grep -qsF "$QUIRK_LINE" "$QUIRK_FILE"; then
+        echo "CUPS USB quirk already present."
+        return 0
+    fi
+
+    echo
+    echo "Citizen label printers stall ~8s per job without a CUPS USB quirk."
+    if [ -t 0 ] && command -v sudo &> /dev/null; then
+        read -p "Install it now (requires sudo)? [y/N]: " install_quirk
+        if [[ "$install_quirk" =~ ^[Yy]$ ]]; then
+            if printf '%s\n%s\n' \
+                "# Citizen CL-E321Z - no USB back-channel; avoids a ~8s stall per job." \
+                "$QUIRK_LINE" | sudo tee "$QUIRK_FILE" > /dev/null; then
+                echo "CUPS USB quirk installed: $QUIRK_FILE"
+                return 0
+            fi
+        fi
+    fi
+
+    echo "Skipped. To apply it later, run as root:"
+    echo "  echo '$QUIRK_LINE' | sudo tee $QUIRK_FILE"
+    echo "No restart needed - the next print job picks it up."
+}
+
+install_usb_quirk || true
+
 echo
 echo "========================================"
 echo "Installation complete!"

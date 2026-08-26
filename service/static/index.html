@@ -20,6 +20,7 @@
     .radio-group label { font-weight: 400; display: flex; align-items: center; gap: 6px; cursor: pointer; }
     .section { border-top: 1px solid #e5e7eb; padding-top: 16px; margin-top: 20px; }
     .btn { display: inline-block; padding: 10px 20px; border: none; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; margin-top: 16px; margin-right: 8px; }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
     .btn-primary { background: #2563eb; color: #fff; }
     .btn-primary:hover { background: #1d4ed8; }
     .btn-secondary { background: #e5e7eb; color: #333; }
@@ -85,7 +86,7 @@
 
       <div id="calStatus" class="cal-info"></div>
 
-      <button class="btn btn-warning btn-sm" onclick="printCalibration()">1. Print Calibration Label</button>
+      <button id="btnCalibrate" class="btn btn-warning btn-sm" onclick="withPrintLock(printCalibration)">1. Print Calibration Label</button>
 
       <div id="calForm" class="hidden" style="margin-top:12px">
         <p class="cal-step"><b>2.</b> Find the first and last <b>tick marks</b> visible at the label edges and enter their values:</p>
@@ -145,7 +146,7 @@
 
     <div class="section">
       <button class="btn btn-primary" onclick="saveConfig()">Save</button>
-      <button class="btn btn-secondary" onclick="testPrint()">Test Print</button>
+      <button id="btnTestPrint" class="btn btn-secondary" onclick="withPrintLock(testPrint)">Test Print</button>
     </div>
 
     <div id="msg" class="msg"></div>
@@ -278,6 +279,29 @@ async function saveConfig() {
     if (r.ok) showMsg("Configuration saved", true);
     else showMsg("Failed to save", false);
   } catch (e) { showMsg("Error: " + e.message, false); }
+}
+
+// ---------- Print button lock ----------
+
+// Only one print may be in flight at a time. CUPS serialises jobs per printer,
+// so a second click does not print sooner — it queues another label behind the
+// first and doubles the wait. Guards both print buttons, not just the one
+// clicked, since the calibration and test labels share the same queue.
+let printBusy = false;
+
+async function withPrintLock(fn) {
+  if (printBusy) return;
+  printBusy = true;
+  const btns = ["btnCalibrate", "btnTestPrint"]
+    .map(id => document.getElementById(id))
+    .filter(Boolean);
+  btns.forEach(b => { b.disabled = true; });
+  try {
+    await fn();
+  } finally {
+    printBusy = false;
+    btns.forEach(b => { b.disabled = false; });
+  }
 }
 
 // ---------- Calibration ----------

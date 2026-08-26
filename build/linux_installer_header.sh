@@ -96,6 +96,61 @@ cp ~/.config/autostart/$MANAGER_NAME.desktop \
 
 echo "Desktop entries created."
 
+# Install the CUPS USB quirk for Citizen label printers.
+#
+# The CL-E321 advertises a bidirectional USB interface but never answers the
+# back-channel read, so the CUPS usb backend blocks ~8s after every job before
+# it will start the next one — labels appear seconds after they were sent, and
+# a second job queues behind the stall. `unidir` removes it. The print service
+# never reads from the printer, so unidirectional I/O costs nothing.
+#
+# Needs root, which this installer otherwise never requires. Best-effort only:
+# it must never abort the install, hence the `|| true` on the call.
+QUIRK_FILE="/usr/share/cups/usb/net.labserve.relims.usb-quirks"
+QUIRK_LINE="0x1d90 0x20f9 unidir"
+
+write_usb_quirk() {
+    printf '%s\n%s\n' \
+        "# Citizen CL-E321Z - no USB back-channel; avoids a ~8s stall per job." \
+        "$QUIRK_LINE"
+}
+
+install_usb_quirk() {
+    # Nothing to do if CUPS isn't present or the quirk is already there.
+    [ -d /usr/share/cups/usb ] || return 0
+    if grep -qsF "$QUIRK_LINE" "$QUIRK_FILE"; then
+        echo "CUPS USB quirk already present."
+        return 0
+    fi
+
+    echo
+    echo "Citizen label printers stall ~8s per job without a CUPS USB quirk."
+
+    if [ "$(id -u)" = "0" ]; then
+        write_usb_quirk > "$QUIRK_FILE"
+        chmod 0644 "$QUIRK_FILE"
+        echo "CUPS USB quirk installed: $QUIRK_FILE"
+        return 0
+    fi
+
+    # Only prompt when there is a terminal to answer; a piped/CI run must not hang.
+    if [ -t 0 ] && command -v sudo &> /dev/null; then
+        read -p "Install it now (requires sudo)? [y/N]: " install_quirk
+        if [[ "$install_quirk" =~ ^[Yy]$ ]]; then
+            if write_usb_quirk | sudo tee "$QUIRK_FILE" > /dev/null; then
+                echo "CUPS USB quirk installed: $QUIRK_FILE"
+                return 0
+            fi
+        fi
+    fi
+
+    echo "Skipped. To apply it later, run as root:"
+    echo "  echo '$QUIRK_LINE' | sudo tee $QUIRK_FILE"
+    echo "No restart needed - the next print job picks it up."
+}
+
+install_usb_quirk || true
+
 echo
 echo "========================================"
 echo "  Installation Complete!"

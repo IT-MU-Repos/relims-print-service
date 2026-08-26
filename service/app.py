@@ -60,7 +60,11 @@ _START_TIME = time.time()
 # ^JUF discards along with the learned label length. Mirrors the legacy VB pair
 # RestoreDefaults() + Calibrate() in LIMS_App/DarkerPrint.vb.
 PRINTER_RESET_ZPL = "^XA^JUF^XZ~JC"
-PRINTER_RESET_SETTLE_SECONDS = 2.0
+# Must cover the whole ~JC media feed on its own. Kept in step with app_linux.py,
+# where a CUPS usb-backend stall used to mask most of the feed until a `unidir`
+# USB quirk removed it. Raised from the legacy 2.0s — it is the value to re-tune
+# if a calibration label ever renders while the media is still feeding.
+PRINTER_RESET_SETTLE_SECONDS = 6.0
 
 # ^MD is a RELATIVE darkness adjustment layered on the printer's own setting
 # (~SD / front panel), so 0 means "leave the printer alone". Zebra's documented

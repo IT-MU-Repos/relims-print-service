@@ -56,6 +56,25 @@ This installs to `~/.local/share/relims-print-manager/`, creates a systemd user 
 - **CUPS (Linux)**: Install CUPS and the Citizen CUPS driver (`ctzcls`). Select **CUPS** backend and choose the printer.
 - **Network (ZPL emulation)**: If the Citizen printer supports ZPL emulation, use **Network (TCP)** backend with port `9100`.
 
+#### CUPS USB quirk (Linux, required for fast printing)
+
+The CL-E321 advertises a bidirectional USB interface but never answers the
+back-channel read, so the CUPS `usb` backend blocks for ~8s after **every** job
+before it will start the next one. Labels appear seconds after they were sent,
+and a second job queues behind the stall rather than printing sooner.
+
+The installers offer to apply the fix. To apply it by hand:
+
+```bash
+echo '0x1d90 0x20f9 unidir' | sudo tee /usr/share/cups/usb/net.labserve.relims.usb-quirks
+```
+
+No restart is needed — the backend loads quirks per job, so the next print picks
+it up. The print service never reads from the printer, so unidirectional I/O
+costs nothing. Verify with `/var/log/cups/error_log`: a job's `time-at-processing`
+and `time-at-completed` should be the same second, and no `Read thread still
+active` line should appear.
+
 ## Updates
 
 The manager automatically checks for updates every hour by polling the GitHub Releases API.
@@ -238,3 +257,4 @@ manually from the Actions tab with **force** ticked.
 | Blank labels | Verify ZPL syntax: `^XA^FO50,50^A0N,40,40^FDTest^FS^XZ` |
 | Tray icon not showing (Linux) | Install GTK: `sudo apt install python3-gi gir1.2-gtk-3.0 gir1.2-appindicator3-0.1` |
 | CUPS not found (Linux) | Install CUPS: `sudo apt install cups` |
+| Labels take ~8s to appear (Linux/USB) | Missing CUPS USB quirk — see [Citizen Printers](#citizen-printers). Confirm with `grep "Read thread still active" /var/log/cups/error_log` |
