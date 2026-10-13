@@ -5,20 +5,32 @@ and sends them to Windows or network printers via ZPL or image data.
 """
 import base64
 import collections
+import functools
 import logging
-import re
 import sys
+import threading
 import time
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
-from config import load_config, save_config, get_config_path
+from config import (
+    load_config, save_config, get_config_path, filter_config_payload,
+    get_allowed_origins, PRINT_OVERRIDE_KEYS,
+)
 from printer import get_printer, WindowsPrinter, HAS_WIN32
 from version import VERSION, COMPONENT
+from zpl import (
+    build_restore_epilogue, carries_printer_config, hand_back, prepare_zpl,
+    restore_mode, strip_persistent,
+)
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
-CORS(app)
+# Not CORS(app): the service listens on loopback, but loopback is reachable
+# from any page the browser has open, and every route below either prints or
+# changes settings. Without an allowlist any site a lab PC visits could
+# print through it or rewrite its settings.
+CORS(app, origins=get_allowed_origins())
 
 # ---------------------------------------------------------------------------
 # Logging — write to file next to config + keep last 200 lines in memory
@@ -55,132 +67,63 @@ logger = _setup_logging()
 
 _START_TIME = time.time()
 
-# Recall factory settings (^JUF — active only, never saved, so a power cycle
-# restores the printer's own config) then re-run media calibration (~JC), which
-# ^JUF discards along with the learned label length. Mirrors the legacy VB pair
-# RestoreDefaults() + Calibrate() in LIMS_App/DarkerPrint.vb.
-PRINTER_RESET_ZPL = "^XA^JUF^XZ~JC"
-# Must cover the whole ~JC media feed on its own. Kept in step with app_linux.py,
-# where a CUPS usb-backend stall used to mask most of the feed until a `unidir`
-# USB quirk removed it. Raised from the legacy 2.0s — it is the value to re-tune
-# if a calibration label ever renders while the media is still feeding.
-PRINTER_RESET_SETTLE_SECONDS = 6.0
 
-# ^MD is a RELATIVE darkness adjustment layered on the printer's own setting
-# (~SD / front panel), so 0 means "leave the printer alone". Zebra's documented
-# range is -30..+30.
-DARKNESS_MIN = -30
-DARKNESS_MAX = 30
+def require_allowed_origin(view):
+    """Reject a cross-origin caller that is not on the allowlist.
 
+    Only requests that actually carry an `Origin` are checked: a browser sets
+    it on exactly the cross-site requests this is here to stop, while curl,
+    the installer's smoke test and the manager tray send none.
 
-def reset_printer_defaults(printer):
-    """Send a factory-recall + media-calibration job and wait for it to settle.
-
-    Sent as its own job rather than glued onto the caller's ZPL so the media
-    feed finishes before the next label renders — the same reason the legacy
-    app slept 2s after resetting.
+    CORS(...) alone is not enough. It makes a browser withhold the *response*
+    from a disallowed origin, but the request still arrives and the side effect
+    still happens — the label is already printed, or the settings already
+    saved, by the time the page is denied the reply.
     """
-    result = printer.print_zpl(PRINTER_RESET_ZPL, copies=1)
-    if not result.get("success"):
-        logger.warning("Printer reset failed: %s", result.get("error"))
-        return result
-    logger.info("Printer reset to factory defaults + media calibration")
-    time.sleep(PRINTER_RESET_SETTLE_SECONDS)
-    return result
+    @functools.wraps(view)
+    def wrapped(*args, **kwargs):
+        origin = request.headers.get("Origin")
+        if origin and origin not in get_allowed_origins():
+            logger.warning("Rejected %s from disallowed origin %s", request.path, origin)
+            return jsonify({
+                "success": False,
+                "error": f"Origin {origin} is not allowed to use this print service.",
+            }), 403
+        return view(*args, **kwargs)
+    return wrapped
 
 
-def apply_zpl_offsets(zpl):
-    """Adjust ZPL positioning using calibrated origin + fine-tune offsets.
+def _printer_configured(cfg):
+    if cfg.get("backend") == "network":
+        return bool(cfg.get("printer_host"))
+    return bool(cfg.get("printer_name"))
 
-    When calibration is active (label_origin_x/y > 0), REPLACES the ^LH
-    in incoming ZPL with the calibrated label-edge position. This means
-    Django's ^LH140,30 (a guess) gets replaced with the measured position,
-    and all ^FO content positions are preserved relative to the label edge.
 
-    When calibration is NOT active, falls back to additive fine-tune only.
+def _refuse_printer_config():
+    logger.warning("Refused a job carrying a printer configuration block")
+    return jsonify({
+        "success": False,
+        "error": "This job contains a printer configuration block (~!!). "
+                 "The print service never changes the printer's own settings.",
+    }), 400
+
+
+def send_startup_restore(cfg=None):
+    """Hand the printer back once when the service starts.
+
+    Covers a crash between a label and its restore, and printers that a
+    pre-2.1.0 service left holding its settings — those are cleaned up the
+    moment a lab PC auto-updates, without anyone power-cycling the printer.
     """
-    cfg = load_config()
-    origin_x = int(cfg.get("label_origin_x", 0))
-    origin_y = int(cfg.get("label_origin_y", 0))
-    fine_x = int(cfg.get("label_offset_x", 0))
-    fine_y = int(cfg.get("label_offset_y", 0))
-    calibrated = origin_x > 0 or origin_y > 0
-
-    if calibrated:
-        # REPLACE mode: set ^LH to the calibrated label edge + fine-tune.
-        # This overrides whatever ^LH Django sent (e.g., ^LH140,30) with
-        # the measured printhead-to-label offset.
-        lh_x = max(0, origin_x + fine_x)
-        lh_y = max(0, origin_y + fine_y)
-
-        def replace_lh(match):
-            return f"^LH{lh_x},{lh_y}"
-
-        if re.search(r'\^LH\d+,\d+', zpl, re.IGNORECASE):
-            zpl = re.sub(r'\^LH(\d+),(\d+)', replace_lh, zpl, flags=re.IGNORECASE)
-        else:
-            zpl = re.sub(r'(\^XA)', rf'\1^LH{lh_x},{lh_y}', zpl, flags=re.IGNORECASE)
-
-        # Override ^PW to full printhead width so content at the calibrated
-        # offset isn't clipped by the printer's stored print width.
-        if re.search(r'\^PW\d+', zpl, re.IGNORECASE):
-            zpl = re.sub(r'\^PW\d+', '^PW832', zpl, flags=re.IGNORECASE)
-        else:
-            zpl = re.sub(r'(\^XA)', r'\1^PW832', zpl, flags=re.IGNORECASE)
-    else:
-        # ADDITIVE mode (no calibration): just add fine-tune to existing ^LH.
-        if fine_x == 0 and fine_y == 0:
-            return zpl
-
-        def adjust_lh(match):
-            x = int(match.group(1)) + fine_x
-            y = int(match.group(2)) + fine_y
-            return f"^LH{max(0, x)},{max(0, y)}"
-
-        if re.search(r'\^LH\d+,\d+', zpl, re.IGNORECASE):
-            zpl = re.sub(r'\^LH(\d+),(\d+)', adjust_lh, zpl, flags=re.IGNORECASE)
-        else:
-            lh = f"^LH{max(0, fine_x)},{max(0, fine_y)}"
-            zpl = re.sub(r'(\^XA)', r'\1' + lh, zpl, flags=re.IGNORECASE)
-
-    return zpl
-
-
-def apply_zpl_darkness(zpl):
-    """Inject ^MD<n> so labels print lighter (negative) or darker (positive).
-
-    ^MD is relative to the printer's own darkness (~SD / front panel), so a
-    configured 0 emits nothing at all and leaves the outgoing ZPL byte-identical
-    to what an unconfigured service would send.
-
-    Darkness is label-global — it affects barcodes and graphics along with text.
-    ZPL has no text-only darkness; the Django renderer's `bold` double-strike is
-    the closest equivalent for text alone.
-    """
-    cfg = load_config()
+    cfg = load_config() if cfg is None else cfg
+    if not _printer_configured(cfg):
+        return None
     try:
-        darkness = int(cfg.get("label_darkness", 0))
-    except (TypeError, ValueError):
-        return zpl
-    # Clamp rather than reject, so a hand-edited config.json can never produce
-    # out-of-range ZPL.
-    darkness = max(DARKNESS_MIN, min(DARKNESS_MAX, darkness))
-    if darkness == 0:
-        return zpl
-    # Strip any ^MD already present — Zebra treats multiple ^MD commands within
-    # one format as CUMULATIVE, so layering ours on top would compound.
-    zpl = re.sub(r'\^MD-?\d+', '', zpl, flags=re.IGNORECASE)
-    # Unbounded: one ^MD per format, so a multi-format payload is covered too.
-    return re.sub(r'(\^XA)', rf'\1^MD{darkness}', zpl, flags=re.IGNORECASE)
-
-
-def prepare_zpl(zpl):
-    """Apply every outbound ZPL transform: position first, then darkness.
-
-    Darkness is deliberately NOT folded into apply_zpl_offsets — that function
-    returns early when no fine-tune is set, which would skip darkness entirely.
-    """
-    return apply_zpl_darkness(apply_zpl_offsets(zpl))
+        printer = get_printer(cfg)
+    except RuntimeError as e:
+        logger.warning("Startup hand-back skipped: %s", e)
+        return None
+    return hand_back(printer, cfg, logger, "service startup")
 
 
 @app.route("/")
@@ -199,9 +142,7 @@ def health():
     cfg = load_config()
     backend = cfg.get("backend", "windows")
     backend_available = HAS_WIN32 if backend == "windows" else True
-    printer_configured = bool(
-        cfg.get("printer_host") if backend == "network" else cfg.get("printer_name")
-    )
+    printer_configured = _printer_configured(cfg)
     return jsonify({
         "service": COMPONENT,
         "status": "ok" if backend_available and printer_configured else "degraded",
@@ -210,6 +151,7 @@ def health():
         "backend": backend,
         "backend_available": backend_available,
         "printer_configured": printer_configured,
+        "restore_mode": restore_mode(cfg),
         "uptime_seconds": int(time.time() - _START_TIME),
     })
 
@@ -227,74 +169,70 @@ def get_config():
 
 
 @app.route("/config", methods=["POST"])
+@require_allowed_origin
 def update_config():
     data = request.get_json(force=True)
-    allowed = {"printer_name", "printer_host", "printer_port", "backend", "api_port", "timeout",
-               "label_offset_x", "label_offset_y",
-               "label_origin_x", "label_origin_y", "label_width", "label_height",
-               "label_darkness"}
-    filtered = {k: v for k, v in data.items() if k in allowed}
-    for int_key in ("printer_port", "api_port", "timeout", "label_offset_x", "label_offset_y",
-                    "label_origin_x", "label_origin_y", "label_width", "label_height",
-                    "label_darkness"):
-        if int_key in filtered:
-            filtered[int_key] = int(filtered[int_key])
-    updated = save_config(filtered)
+    updated = save_config(filter_config_payload(data))
     return jsonify(updated)
 
 
-@app.route("/reset-printer", methods=["POST"])
-def reset_printer_settings():
-    """Recall the printer's factory settings and re-run media calibration.
+def resolve_request_config(data):
+    """Merge a job's optional `config` override over the saved settings.
 
-    Its own deliberate action rather than a side effect of printing. It used to
-    be bolted onto the calibration label via the `reset_printer` flag, so anyone
-    measuring the ruler silently lost the darkness and speed the lab had dialled
-    in on the printer's front panel. Those are now separate choices.
-
-    ^JUF recalls the active configuration only — never saved — so a power cycle
-    restores whatever the printer had.
+    Returns (config, overridden_keys). Nothing is written to disk: this is how
+    Test Print renders through the values shown on the settings page before the
+    user has decided to keep them. Saving stays the job of POST /config alone.
     """
-    try:
-        printer = get_printer()
-    except RuntimeError as e:
-        return jsonify({"success": False, "error": str(e)}), 500
-
-    logger.info("/reset-printer request")
-    result = reset_printer_defaults(printer)
-    status_code = 200 if result.get("success") else 500
-    return jsonify(result), status_code
+    cfg = load_config()
+    override = filter_config_payload((data or {}).get("config"), PRINT_OVERRIDE_KEYS)
+    if not override:
+        return cfg, []
+    cfg.update(override)
+    return cfg, sorted(override)
 
 
 @app.route("/print", methods=["POST"])
+@require_allowed_origin
 def print_label():
     data = request.get_json(force=True)
     zpl = data.get("zpl", "").strip()
     image_b64 = data.get("image", "").strip()
     if not zpl and not image_b64:
         return jsonify({"success": False, "error": "No ZPL or image data provided"}), 400
+    if carries_printer_config(zpl):
+        return _refuse_printer_config()
     copies = max(1, int(data.get("copies", 1)))
     raw = data.get("raw", False)
-    reset_printer = data.get("reset_printer", False)
+    if data.get("reset_printer"):
+        # Kept as an accepted key so older callers still print, but the reset
+        # it asked for is gone — see zpl.py.
+        logger.warning("/print: ignoring reset_printer — the service never resets the printer")
+    cfg, overridden = resolve_request_config(data)
     try:
-        printer = get_printer()
+        printer = get_printer(cfg)
     except RuntimeError as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
-    logger.info("/print request: copies=%d, has_image=%s, has_zpl=%s, raw=%s, reset=%s",
-                copies, bool(image_b64), bool(zpl), raw, reset_printer)
+    logger.info("/print request: copies=%d, has_image=%s, has_zpl=%s, raw=%s, override=%s",
+                copies, bool(image_b64), bool(zpl), raw, overridden or "none")
 
     # Prefer ZPL when available — ZPL printers (e.g. Zebra ZD220) need raw
     # ZPL commands via win32print RAW.  Image printing via PowerShell
     # PrintDocument may "succeed" at the OS/spooler level but produce no
     # output because the ZPL driver cannot render raster data.
     if zpl:
-        # A failed reset is logged but does not block the print — a non-Zebra
-        # unit that rejects ^JUF should still be able to print.
-        if reset_printer:
-            reset_printer_defaults(printer)
-        final_zpl = zpl if raw else prepare_zpl(zpl)
-        result = printer.print_zpl(final_zpl, copies=copies)
+        final_zpl = strip_persistent(zpl if raw else prepare_zpl(zpl, cfg))
+        # Outside the `raw` branch on purpose. `raw` means "do not rewrite my
+        # ZPL", not "do not clean up after it" — a raw payload still leaves its
+        # own ^PW/^LL/^CI in the printer's active configuration, and the
+        # calibration ruler is raw.
+        epilogue = build_restore_epilogue(cfg)
+        result = printer.print_zpl(final_zpl, copies=copies, epilogue=epilogue)
+        if result["success"]:
+            logger.info("/print: restore sent with the job: %s", epilogue or "none (mode off)")
+        else:
+            # The label may have reached the printer without its restore.
+            hand_back(printer, cfg, logger, "after a failed /print")
         if result["success"] or not image_b64:
             status_code = 200 if result["success"] else 500
             return jsonify(result), status_code
@@ -313,15 +251,21 @@ def print_label():
 
 
 @app.route("/print-batch", methods=["POST"])
+@require_allowed_origin
 def print_batch():
     data = request.get_json(force=True)
     zpls = data.get("zpls", [])
     images_b64 = data.get("images", [])
     if not zpls and not images_b64:
         return jsonify({"success": False, "error": "No zpls or images provided"}), 400
+    if any(carries_printer_config(z) for z in zpls):
+        return _refuse_printer_config()
     copies = max(1, int(data.get("copies", 1)))
+    # No `config` override here — batches come from the apps, which have no
+    # settings form behind them. Always the saved configuration.
+    cfg = load_config()
     try:
-        printer = get_printer()
+        printer = get_printer(cfg)
     except RuntimeError as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
@@ -330,16 +274,28 @@ def print_batch():
 
     # Prefer ZPL batch (same reasoning as /print — ZPL printers need raw commands)
     if zpls:
-        shifted = [prepare_zpl(z) for z in zpls]
+        shifted = [strip_persistent(prepare_zpl(z, cfg)) for z in zpls]
+        epilogue = build_restore_epilogue(cfg)
         if hasattr(printer, 'print_batch_zpl'):
-            result = printer.print_batch_zpl(shifted, copies_each=copies)
+            result = printer.print_batch_zpl(shifted, copies_each=copies, epilogue=epilogue)
         else:
             printed = 0
-            for zpl in shifted:
-                r = printer.print_zpl(zpl, copies=copies)
+            for index, zpl in enumerate(shifted):
+                # Only after the last label — a restore between labels would
+                # print the rest of the batch at the handed-back settings.
+                last = index == len(shifted) - 1
+                r = printer.print_zpl(
+                    zpl, copies=copies, epilogue=epilogue if last else None
+                )
                 if r["success"]:
                     printed += 1
             result = {"success": printed == len(zpls), "printed": printed, "total": len(zpls)}
+        if result["success"]:
+            logger.info("/print-batch: restore sent with the job: %s", epilogue or "none (mode off)")
+        else:
+            # Some labels may have printed without the restore that follows
+            # the last one — including when the last label is the one that failed.
+            hand_back(printer, cfg, logger, "after a failed /print-batch")
         status_code = 200 if result["success"] else 500
         return jsonify(result), status_code
     # Image batch fallback
@@ -374,6 +330,9 @@ def main():
     debug = "--debug" in sys.argv
     logger.info("ReLIMS Print Service v%s starting on port %d", VERSION, port)
     print(f"ReLIMS Print Service v{VERSION} running on http://localhost:{port}")
+    # In the background: a printer that is off or unreachable must not delay
+    # the service coming up.
+    threading.Thread(target=send_startup_restore, args=(cfg,), daemon=True).start()
     app.run(host="127.0.0.1", port=port, debug=debug)
 
 

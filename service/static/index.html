@@ -82,7 +82,8 @@
     <div class="section">
       <label style="margin-top:0">Label Calibration <span id="calBadge" class="cal-badge unset">Not calibrated</span></label>
       <p class="cal-step">Calibration maps the printer's coordinate system to your physical label stock.</p>
-      <p class="cal-step">The calibration label prints exactly as-is and <b>leaves your printer settings alone</b> &mdash; any darkness or speed set on the front panel is kept. If the ruler looks wrong because the printer itself is misconfigured, use <b>Reset Printer Settings</b> below first, then calibrate.</p>
+      <p class="cal-step">This measures where <b>ReLIMS</b> labels should sit. The ruler prints exactly as-is and the printer is handed back afterwards, so it <b>does not change your printer's settings</b> &mdash; darkness, speed and alignment set on the front panel are kept.</p>
+      <p class="cal-step">It has <b>no effect on the offline LIMS</b>, which reads its alignment from the printer itself &mdash; see <b>Offline LIMS alignment</b> below for that.</p>
 
       <div id="calStatus" class="cal-info"></div>
 
@@ -144,24 +145,43 @@
       <button class="btn btn-secondary btn-sm" onclick="resetDarkness()">Reset to 0</button>
     </div>
 
-    <!-- Printer Reset Section -->
+    <!-- Shared Printer Section -->
     <div class="section">
-      <label style="margin-top:0">Reset Printer Settings</label>
+      <label style="margin-top:0">Sharing this printer with other software</label>
       <p style="font-size:12px;color:#888;margin-bottom:12px">
-        Recalls the printer's <b>factory settings</b> and re-runs media calibration.
-        This discards any darkness or speed set on the printer's <b>front panel</b>, and
-        feeds a few labels while it measures. A power cycle restores the printer's own
-        config &mdash; the reset is not saved to it.
+        ZPL's width, position and darkness commands <b>stay set on the printer</b> after a label
+        prints, so without this the next thing to print &mdash; the old LIMS desktop app, or
+        anything using the printer driver &mdash; comes out with this service's settings.
+        Each job hands the printer back afterwards. This service never writes to the printer's
+        own memory &mdash; your settings on this page travel with every label instead.
         <br>
-        Your saved settings on this page (calibration offsets and print darkness) are
-        <b>not</b> affected &mdash; the service re-applies those to every label.
+        If LIMS labels are already off: power-cycle the printer. If that is not enough on a Citizen,
+        use the LIMS app's own <b>Printer Maintenance &rarr; Fix My Printer</b>, which re-sends its known-good setup.
       </p>
-      <button id="btnResetPrinter" class="btn btn-warning btn-sm" onclick="withPrintLock(resetPrinterSettings)">Reset Printer Settings</button>
+      <select id="printerRestoreMode" onchange="updateRestoreWarning()">
+        <option value="jur">Restore the printer's saved settings after each label (recommended)</option>
+        <option value="neutralize">Put back the power-on defaults (for printers that ignore ^JU)</option>
+        <option value="off">Leave settings on the printer (pre-2.1.0 behaviour)</option>
+      </select>
+      <div id="restoreOffWarning" class="msg err" style="display:none">
+        Restore is off: labels from other software &mdash; including the LIMS app &mdash; will print
+        with this service's position and darkness. Only use this to roll back on a printer the
+        restore misbehaves on.
+      </div>
+      <p style="font-size:12px;color:#888;margin-top:8px">
+        Pick <b>put back the power-on defaults</b> if LIMS labels still come out wrong
+        on the recommended setting &mdash; not every printer's ZPL emulation implements the
+        recall command.
+      </p>
     </div>
 
     <div class="section">
       <button class="btn btn-primary" onclick="saveConfig()">Save</button>
       <button id="btnTestPrint" class="btn btn-secondary" onclick="withPrintLock(testPrint)">Test Print</button>
+      <p style="font-size:12px;color:#888;margin-top:12px">
+        Test Print uses the settings shown on this page, including ones you have not saved &mdash;
+        try a value first, then press <b>Save</b> to keep it.
+      </p>
     </div>
 
     <div id="msg" class="msg"></div>
@@ -223,6 +243,8 @@ async function loadConfig() {
     document.getElementById("labelOffsetX").value = c.label_offset_x || 0;
     document.getElementById("labelOffsetY").value = c.label_offset_y || 0;
     document.getElementById("labelDarkness").value = c.label_darkness || 0;
+    document.getElementById("printerRestoreMode").value = c.printer_restore_mode || "jur";
+    updateRestoreWarning();
     updateDarknessValue();
     toggleBackend();
     await loadPrinters();
@@ -277,7 +299,16 @@ function toggleBackend() {
 
 document.querySelectorAll('input[name="backend"]').forEach(r => r.addEventListener("change", toggleBackend));
 
-async function saveConfig() {
+// The settings exactly as they stand on screen, saved or not. Save posts this
+// to /config; the print buttons send it as a per-job override so what you are
+// about to print matches what you are looking at. One reader, so the two can
+// never disagree about which fields a setting is made of.
+function updateRestoreWarning() {
+  const off = document.getElementById("printerRestoreMode").value === "off";
+  document.getElementById("restoreOffWarning").style.display = off ? "block" : "none";
+}
+
+function collectConfigForm() {
   const backend = document.querySelector('input[name="backend"]:checked').value;
   const body = { backend };
   if (backend === "windows" || backend === "cups") {
@@ -289,6 +320,12 @@ async function saveConfig() {
   body.label_offset_x = parseInt(document.getElementById("labelOffsetX").value) || 0;
   body.label_offset_y = parseInt(document.getElementById("labelOffsetY").value) || 0;
   body.label_darkness = parseInt(document.getElementById("labelDarkness").value) || 0;
+  body.printer_restore_mode = document.getElementById("printerRestoreMode").value;
+  return body;
+}
+
+async function saveConfig() {
+  const body = collectConfigForm();
   try {
     const r = await fetch(API + "/config", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body) });
     if (r.ok) showMsg("Configuration saved", true);
@@ -307,7 +344,7 @@ let printBusy = false;
 async function withPrintLock(fn) {
   if (printBusy) return;
   printBusy = true;
-  const btns = ["btnCalibrate", "btnTestPrint", "btnResetPrinter"]
+  const btns = ["btnCalibrate", "btnTestPrint"]
     .map(id => document.getElementById(id))
     .filter(Boolean);
   btns.forEach(b => { b.disabled = true; });
@@ -317,24 +354,6 @@ async function withPrintLock(fn) {
     printBusy = false;
     btns.forEach(b => { b.disabled = false; });
   }
-}
-
-// ---------- Printer reset ----------
-
-// Deliberately separate from calibration. Folding it into the calibration label
-// meant anyone measuring the ruler silently lost the front-panel darkness and
-// speed the lab had tuned.
-async function resetPrinterSettings() {
-  if (!confirm("Reset the printer to factory settings?\n\nThis discards any darkness or speed set on the printer's front panel and feeds a few labels while it re-calibrates the media.\n\nYour saved settings on this page are not affected.")) return;
-  try {
-    const r = await fetch(API + "/reset-printer", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"}
-    });
-    const d = await r.json();
-    if (d.success) showMsg("Printer reset to factory defaults and media re-calibrated", true);
-    else showMsg("Reset failed: " + (d.error || "Unknown error"), false);
-  } catch (e) { showMsg("Error: " + e.message, false); }
 }
 
 // ---------- Calibration ----------
@@ -409,10 +428,12 @@ async function printCalibration() {
 
   zpl += "^XZ";
   try {
+    // `raw` keeps offsets and darkness off the ruler; the override only decides
+    // which printer it comes out of — the one selected above, saved or not.
     const r = await fetch(API + "/print", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ zpl, raw: true })
+      body: JSON.stringify({ zpl, raw: true, config: collectConfigForm() })
     });
     const d = await r.json();
     if (d.success) {
@@ -509,8 +530,13 @@ function generateTestImage(w, h) {
 }
 
 async function testPrint() {
-  const backend = document.querySelector('input[name="backend"]:checked').value;
-  // Fetch config to get calibrated label dimensions
+  // The whole point of a test print is to try a setting before keeping it, so
+  // the label is printed through the values on screen — sent as a per-job
+  // override that the service applies and does not save.
+  const override = collectConfigForm();
+  const backend = override.backend;
+  // Label dimensions still come from the saved calibration: Apply Calibration
+  // writes them immediately, so there is no unsaved geometry to honour here.
   let w = 480, h = 240;
   try {
     const cr = await fetch(API + "/config");
@@ -530,7 +556,10 @@ async function testPrint() {
     "^FO15,110^A0N,16,13^FDCalibration active^FS" +
     "^FO15," + (h - 30) + "^A0N,14,11^FDBorder should align with label edges^FS" +
     "^XZ";
-  const body = { zpl };
+  const body = { zpl, config: override };
+  // Safe to decide from the form now: the service prints through the same
+  // backend, so the rasterised fallback can no longer be attached for one
+  // backend while the label goes out through another.
   if (backend === "cups" || backend === "windows") {
     body.image = generateTestImage(w, h);
   }

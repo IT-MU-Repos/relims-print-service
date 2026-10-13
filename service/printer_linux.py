@@ -19,7 +19,7 @@ class NetworkPrinter:
         self.port = port or cfg["printer_port"]
         self.timeout = timeout or cfg["timeout"]
 
-    def print_zpl(self, zpl, copies=1):
+    def print_zpl(self, zpl, copies=1, epilogue=None):
         if not self.host:
             return {"success": False, "error": "Printer host not configured"}
         try:
@@ -28,6 +28,11 @@ class NetworkPrinter:
                 sock.connect((self.host, self.port))
                 for _ in range(copies):
                     sock.sendall(zpl.encode("utf-8"))
+                # After the last copy, never between them — a restore that
+                # landed mid-run would print copies 2..n at the handed-back
+                # settings instead of ours.
+                if epilogue:
+                    sock.sendall(epilogue.encode("utf-8"))
             return {"success": True, "copies": copies}
         except socket.timeout:
             return {"success": False, "error": f"Connection timed out to {self.host}:{self.port}"}
@@ -37,7 +42,7 @@ class NetworkPrinter:
     def print_image(self, image_data, copies=1):
         return {"success": False, "error": "Image printing not supported over network. Use ZPL or switch to CUPS backend."}
 
-    def print_batch_zpl(self, zpls, copies_each=1):
+    def print_batch_zpl(self, zpls, copies_each=1, epilogue=None):
         """Send multiple ZPL labels through a single TCP connection."""
         if not self.host:
             return {"success": False, "printed": 0, "total": len(zpls), "error": "Printer host not configured"}
@@ -50,6 +55,8 @@ class NetworkPrinter:
                     for _ in range(copies_each):
                         sock.sendall(zpl.encode("utf-8"))
                     printed += 1
+                if epilogue:
+                    sock.sendall(epilogue.encode("utf-8"))
             return {"success": True, "printed": printed, "total": len(zpls)}
         except socket.timeout:
             return {"success": False, "printed": printed, "total": len(zpls), "error": f"Connection timed out to {self.host}:{self.port}"}
@@ -67,20 +74,24 @@ class CUPSPrinter:
         self.printer_name = printer_name or cfg["printer_name"]
         self.timeout = timeout or cfg.get("timeout", 30)
 
-    def print_zpl(self, zpl, copies=1):
+    def print_zpl(self, zpl, copies=1, epilogue=None):
         if not self.printer_name:
             return {"success": False, "error": "Printer name not configured"}
         try:
-            cmd = [
-                'lp',
-                '-d', self.printer_name,
-                '-n', str(copies),
-                '-o', 'raw',
-                '-',
-            ]
+            cmd = ['lp', '-d', self.printer_name]
+            if epilogue:
+                # `lp -n` re-sends the whole payload per copy, which would
+                # replay the restore between copies and print copies 2..n at
+                # the handed-back settings. Repeat the label ourselves instead
+                # so the epilogue can land exactly once, at the end.
+                payload = zpl * copies + epilogue
+            else:
+                cmd += ['-n', str(copies)]
+                payload = zpl
+            cmd += ['-o', 'raw', '-']
             result = subprocess.run(
                 cmd,
-                input=zpl.encode('utf-8'),
+                input=payload.encode('utf-8'),
                 capture_output=True,
                 timeout=self.timeout,
             )
@@ -133,7 +144,7 @@ class CUPSPrinter:
                 except OSError:
                     pass
 
-    def print_batch_zpl(self, zpls, copies_each=1):
+    def print_batch_zpl(self, zpls, copies_each=1, epilogue=None):
         """Send multiple ZPL labels in a single CUPS job."""
         if not self.printer_name:
             return {"success": False, "printed": 0, "total": len(zpls), "error": "Printer name not configured"}
@@ -141,6 +152,8 @@ class CUPSPrinter:
             combined = ''
             for zpl in zpls:
                 combined += zpl * copies_each
+            if epilogue:
+                combined += epilogue
             cmd = [
                 'lp',
                 '-d', self.printer_name,
@@ -254,13 +267,22 @@ class CUPSPrinter:
             return ""
 
 
-def get_printer():
-    """Get the appropriate printer based on configuration."""
-    cfg = load_config()
+def get_printer(cfg=None):
+    """Get the appropriate printer based on configuration.
+
+    `cfg` lets a caller print through settings that are not saved — the Test
+    Print button sends the values on screen so they can be tried before being
+    committed. Omit it for the saved configuration.
+    """
+    cfg = load_config() if cfg is None else cfg
     backend = cfg.get("backend", "cups")
 
     if backend == "network":
-        return NetworkPrinter()
+        return NetworkPrinter(
+            host=cfg.get("printer_host"),
+            port=cfg.get("printer_port"),
+            timeout=cfg.get("timeout"),
+        )
 
     # Default to CUPS on Linux
     if not HAS_CUPS:
@@ -268,4 +290,4 @@ def get_printer():
             "CUPS printer backend selected but lp command is not available. "
             "Install CUPS or switch to 'network' backend."
         )
-    return CUPSPrinter()
+    return CUPSPrinter(printer_name=cfg.get("printer_name"), timeout=cfg.get("timeout"))

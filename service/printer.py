@@ -21,7 +21,7 @@ class NetworkPrinter:
         self.port = port or cfg["printer_port"]
         self.timeout = timeout or cfg["timeout"]
 
-    def print_zpl(self, zpl, copies=1):
+    def print_zpl(self, zpl, copies=1, epilogue=None):
         if not self.host:
             return {"success": False, "error": "Printer host not configured"}
         try:
@@ -30,6 +30,11 @@ class NetworkPrinter:
                 sock.connect((self.host, self.port))
                 for _ in range(copies):
                     sock.sendall(zpl.encode("utf-8"))
+                # After the last copy, never between them — a restore that
+                # landed mid-run would print copies 2..n at the handed-back
+                # settings instead of ours.
+                if epilogue:
+                    sock.sendall(epilogue.encode("utf-8"))
             logger.info("ZPL sent to %s:%s (%d copies)", self.host, self.port, copies)
             return {"success": True, "copies": copies}
         except socket.timeout:
@@ -43,7 +48,7 @@ class NetworkPrinter:
     def print_image(self, image_data, copies=1):
         return {"success": False, "error": "Image printing not supported over network. Use ZPL or switch to Windows/CUPS backend."}
 
-    def print_batch_zpl(self, zpls, copies_each=1):
+    def print_batch_zpl(self, zpls, copies_each=1, epilogue=None):
         """Send multiple ZPL labels through a single TCP connection."""
         if not self.host:
             return {"success": False, "printed": 0, "total": len(zpls), "error": "Printer host not configured"}
@@ -56,6 +61,8 @@ class NetworkPrinter:
                     for _ in range(copies_each):
                         sock.sendall(zpl.encode("utf-8"))
                     printed += 1
+                if epilogue:
+                    sock.sendall(epilogue.encode("utf-8"))
             logger.info("ZPL batch sent to %s:%s (%d/%d)", self.host, self.port, printed, len(zpls))
             return {"success": True, "printed": printed, "total": len(zpls)}
         except socket.timeout:
@@ -74,7 +81,7 @@ class WindowsPrinter:
         cfg = load_config()
         self.printer_name = printer_name or cfg["printer_name"] or win32print.GetDefaultPrinter()
 
-    def print_zpl(self, zpl, copies=1):
+    def print_zpl(self, zpl, copies=1, epilogue=None):
         try:
             handle = win32print.OpenPrinter(self.printer_name)
             try:
@@ -82,6 +89,13 @@ class WindowsPrinter:
                 win32print.StartPagePrinter(handle)
                 for _ in range(copies):
                     win32print.WritePrinter(handle, zpl.encode("utf-8"))
+                # After the last copy, never between them — a restore that
+                # landed mid-run would print copies 2..n at the handed-back
+                # settings instead of ours. Inside the same spooler document,
+                # so nothing else can interleave a job between label and
+                # restore.
+                if epilogue:
+                    win32print.WritePrinter(handle, epilogue.encode("utf-8"))
                 win32print.EndPagePrinter(handle)
                 win32print.EndDocPrinter(handle)
             finally:
@@ -92,7 +106,7 @@ class WindowsPrinter:
             logger.error("ZPL print to '%s' failed: %s", self.printer_name, e)
             return {"success": False, "error": str(e)}
 
-    def print_batch_zpl(self, zpls, copies_each=1):
+    def print_batch_zpl(self, zpls, copies_each=1, epilogue=None):
         """Send multiple ZPL labels through a single Windows print job."""
         try:
             handle = win32print.OpenPrinter(self.printer_name)
@@ -104,6 +118,8 @@ class WindowsPrinter:
                     for _ in range(copies_each):
                         win32print.WritePrinter(handle, zpl.encode("utf-8"))
                     printed += 1
+                if epilogue:
+                    win32print.WritePrinter(handle, epilogue.encode("utf-8"))
                 win32print.EndPagePrinter(handle)
                 win32print.EndDocPrinter(handle)
             finally:
@@ -186,13 +202,23 @@ class WindowsPrinter:
             return ""
 
 
-def get_printer():
-    cfg = load_config()
-    if cfg["backend"] == "network":
-        return NetworkPrinter()
+def get_printer(cfg=None):
+    """Get the appropriate printer based on configuration.
+
+    `cfg` lets a caller print through settings that are not saved — the Test
+    Print button sends the values on screen so they can be tried before being
+    committed. Omit it for the saved configuration.
+    """
+    cfg = load_config() if cfg is None else cfg
+    if cfg.get("backend") == "network":
+        return NetworkPrinter(
+            host=cfg.get("printer_host"),
+            port=cfg.get("printer_port"),
+            timeout=cfg.get("timeout"),
+        )
     if not HAS_WIN32:
         raise RuntimeError(
             "Windows printer backend selected but win32print is not available. "
             "Switch to 'network' backend or run on Windows."
         )
-    return WindowsPrinter()
+    return WindowsPrinter(printer_name=cfg.get("printer_name"))

@@ -71,9 +71,82 @@ echo '0x1d90 0x20f9 unidir' | sudo tee /usr/share/cups/usb/net.labserve.relims.u
 
 No restart is needed — the backend loads quirks per job, so the next print picks
 it up. The print service never reads from the printer, so unidirectional I/O
-costs nothing. Verify with `/var/log/cups/error_log`: a job's `time-at-processing`
+costs it nothing.
+
+**This is system-wide.** The quirk applies to every CUPS client on the machine
+that talks to a CL-E321, not just this service, so any other software loses the
+printer's back-channel (status and media queries) too. It is also the one change
+uninstalling cannot undo on its own — removing it needs root, so the uninstaller
+prints the command rather than running it:
+
+```bash
+sudo rm /usr/share/cups/usb/net.labserve.relims.usb-quirks
+```
+ Verify with `/var/log/cups/error_log`: a job's `time-at-processing`
 and `time-at-completed` should be the same second, and no `Read thread still
 active` line should appear.
+
+## Sharing a printer with other software
+
+ZPL's positioning, width and darkness commands are **modal**: they update the
+printer's *active configuration* and stay in effect for every later format until
+changed again or the printer is powered off. A label job therefore leaves its
+`^MD` darkness, `^LH` label home and `^PW` width — plus the `^LL` and `^CI` the
+Main-API renderer emits — sitting on the printer for whatever prints next. On a
+lab PC that is usually the legacy VB.NET LIMS app or ordinary driver printing,
+which then come out wrong.
+
+Since 2.1.0 every job ends with a small configuration-only format that hands the
+printer back. It carries no field data, so it costs no media.
+
+| `printer_restore_mode` | Sends | Use when |
+|---|---|---|
+| `"jur"` *(default)* | `^XA^LH0,0^MD0^CI0^JUR^XZ` — power-on values, then recall the printer's saved configuration | Normally. `^JUR` restores wholesale, so it also undoes the renderer's `^PW`/`^LL`. The power-on values in front are a failsafe for a printer that ignores `^JUR`. |
+| `"neutralize"` | `^XA^LH0,0^MD0^CI0^XZ` — put back the power-on values | The printer's ZPL emulation does not implement `^JU`. Cannot restore `^PW`/`^LL`, whose power-on values depend on the printer. |
+| `"off"` | nothing | Reproducing pre-2.1.0 behaviour. |
+
+The restore is sent once, after the last copy, inside the same connection or
+spooler document as the label — never between copies, which would print copies
+2..n at the handed-back settings, and never as a separate job, which would let
+another application slip a print in between.
+
+## The service never changes the printer's settings
+
+Its own settings — calibrated origin and darkness — travel inside every label, and
+the restore above hands the printer back afterwards. Nothing it sends writes to the
+printer's permanent memory, recalls defaults or re-calibrates media: `^JUS`, `^JUF`,
+`^JUN`, `^JUA`, `~JC`, `~JL`, `~JR` and `~SD`/`^SD` are stripped from every outgoing job,
+`raw` ones included.
+
+That matters because the legacy offline LIMS sends no `^LH`, `^PW`, `^LL` or `^CI` of its
+own — it relies on the printer's own setup. On the Citizen CL-E321 that setup is
+`CitizenPrinter.CONFIG_STR` in LIMS_SOURCE.
+
+Up to v2.0.16 the service had a **Reset Printer Settings** action (`^JUF` + `~JC`), which
+wiped that setup. It was removed in v2.1.0, as was an unreleased `^JUS` "baseline". If LIMS
+labels are already off:
+
+1. Power-cycle the printer. That clears anything an older service left active.
+2. If that is not enough on a Citizen, use the LIMS app's own **Printer Maintenance → Fix My
+   Printer**, which re-sends its known-good setup.
+
+
+### Failsafes
+
+- **Restore works without `^JUR`.** The default restore puts back label home, darkness and
+  code page before `^JUR`, so those come back even on a printer that ignores it.
+- **A failed job still hands the printer back.** If a job fails partway, the label may be on
+  the printer without its restore, so the restore is sent again as a job of its own.
+- **Restore on startup.** The service hands the printer back once when it starts. That covers
+  a crash between a label and its restore, and printers an older service left dirty. The
+  restore prints nothing.
+- **The filter cannot be bypassed.** `^CC`/`~CC`/`^CT`/`~CT` (which change the command
+  prefix) are stripped too, and a job containing a Citizen configuration block (`~!!`) is
+  refused with `400`.
+- **Visible state.** `/health` reports `restore_mode`, each job logs the restore it sent, and
+  the settings page warns when restore is off.
+- **Per-PC rollback.** `"printer_restore_mode": "off"` in one PC's `config.json` sends exactly
+  what pre-2.1.0 sent, if the restore ever misbehaves on a particular printer.
 
 ## Updates
 
@@ -100,8 +173,7 @@ The print service runs on `http://localhost:5577`.
 | `/printers` | GET | List available printers |
 | `/config` | GET | Get current configuration |
 | `/config` | POST | Update configuration (partial updates) |
-| `/print` | POST | Send ZPL (and/or base64 image) to printer. Optional `"raw": true` (skip calibration offsets) and `"reset_printer": true` (recall factory settings + re-calibrate media first) |
-| `/reset-printer` | POST | Recall the printer's factory settings and re-run media calibration. No body |
+| `/print` | POST | Send ZPL (and/or base64 image) to printer. Optional `"raw": true` (skip calibration offsets). `"reset_printer"` is accepted but ignored since v2.1.0 |
 | `/print-batch` | POST | Send multiple labels in a single job |
 | `/logs` | GET | Last 200 log lines (debugging) |
 | `/` | GET | Printer configuration UI |
@@ -130,7 +202,9 @@ Config is stored at:
 | `timeout` | `5` | Socket timeout in seconds |
 | `label_offset_x` / `label_offset_y` | `0` | Fine-tune print position offsets (dots) |
 | `label_origin_x` / `label_origin_y` | `0` | Calibrated label origin (dots); when set, replaces incoming `^LH` |
-| `label_width` / `label_height` | `0` | Label dimensions used by calibration |
+| `label_width` / `label_height` | `0` | Label dimensions from calibration. `label_width` also sets `^PW`: content shifted right by `label_origin_x` needs a print width covering the offset too. |
+| `printer_restore_mode` | `"jur"` | How a job hands the printer back — see [Sharing a printer](#sharing-a-printer-with-other-software). `"jur"`, `"neutralize"`, or `"off"`. |
+| `allowed_origins` | loopback | Origins allowed to print or change settings. **Not writable over HTTP** — edit `config.json`. |
 | `label_darkness` | `0` | Print darkness, `-30`…`30`. Injected as `^MD`, which is **relative** to the printer's own darkness — `0` emits nothing and leaves the printer untouched. Negative is brighter, positive is darker. Label-global (affects barcodes too) and ZPL-only. |
 
 ## Development

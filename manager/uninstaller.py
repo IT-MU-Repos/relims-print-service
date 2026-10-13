@@ -119,5 +119,29 @@ def uninstall_linux(keep_config=False):
     if install_dir.exists():
         shutil.rmtree(install_dir, ignore_errors=True)
 
+    _report_usb_quirk()
+
     print("ReLIMS Print Manager has been uninstalled.")
     sys.exit(0)
+
+
+USB_QUIRK_FILE = Path("/usr/share/cups/usb/net.labserve.relims.usb-quirks")
+
+
+def _report_usb_quirk():
+    """Point out the one thing uninstalling cannot clean up by itself.
+
+    The installer may have written a system-wide CUPS quirk disabling the USB
+    back-channel for Citizen CL-E321 printers. It is system-wide and affects
+    every CUPS client on the machine, not just this service, so leaving it
+    behind silently means an uninstalled service still shapes how other
+    software talks to that printer. Removing it needs root, which a user-level
+    uninstall does not have — so say so rather than fail.
+    """
+    if not USB_QUIRK_FILE.exists():
+        return
+    print()
+    print(f"NOTE: a system-wide CUPS USB quirk is still installed at {USB_QUIRK_FILE}.")
+    print("It disables the USB back-channel for Citizen CL-E321 printers for EVERY")
+    print("application on this machine. Remove it (as root) with:")
+    print(f"  sudo rm {USB_QUIRK_FILE}")

@@ -31,7 +31,6 @@ a system tray manager keeps it running and auto-updates it hourly.
 | `/config` | POST | Partial config update, returns updated config |
 | `/print` | POST | Print one label — see [Printing](#printing) |
 | `/print-batch` | POST | Print many labels in one job — see [Printing](#printing) |
-| `/reset-printer` | POST | Recall factory settings + re-run media calibration (v2.0.16+). No body |
 | `/logs` | GET | Last 200 log lines: `{"lines": ["..."]}` |
 | `/` | GET | Built-in printer configuration UI (link users here to set up their printer) |
 
@@ -174,29 +173,90 @@ picks the best format for the configured printer (ZPL preferred for ZPL-capable 
 { "zpl": "^XA^FO50,50^A0N,40,40^FDHello^FS^XZ", "image": "<base64 PNG>", "copies": 1 }
 ```
 
-Two optional flags, both honoured on Windows and Linux since v2.0.13 (`raw` was
-Linux-only before that):
+Two optional fields. `raw` is honoured on Windows and Linux since v2.0.13 (Linux-only
+before that); `config` since v2.1.0:
 
-| Flag | Default | Effect |
+| Field | Default | Effect |
 | --- | --- | --- |
-| `"raw": true` | `false` | Send the ZPL untouched — bypasses the service's stored label-calibration offsets (`^LH` / `^PW` rewriting) **and** its print-darkness setting (`^MD` injection). |
-| `"reset_printer": true` | `false` | Before printing, send `^XA^JUF^XZ~JC` as its own job and wait ~2s: recalls the printer's factory settings and re-runs media calibration. Not saved to the printer, so a power cycle restores its own config. |
+| `"raw": true` | `false` | Send the ZPL untouched — bypasses the service's stored label-calibration offsets (`^LH` / `^PW` rewriting) **and** its print-darkness setting (`^MD` injection). It does **not** bypass the restore epilogue below: `raw` means "do not rewrite my ZPL", not "do not clean up after it". Persistent commands are still stripped (see below). |
+| `"config": { … }` | — | Settings to use **for this job only**. Merged over the saved config; never written to disk. |
 
-`reset_printer` is retained for compatibility but is **not used by the built-in
-calibration flow any more** — printing the calibration label no longer touches the
-printer. Resetting is its own explicit action: `POST /reset-printer` (no body), exposed
-as **Reset Printer Settings** on the settings page. Prefer that endpoint over the flag.
+**`reset_printer` was removed in v2.1.0.** It sent `^XA^JUF^XZ~JC`, a factory recall,
+before the label. A request still sending the flag is accepted and the flag is ignored.
+The `POST /reset-printer` endpoint that briefly replaced it is gone too: the service
+never changes the printer's own settings (see below).
 
-Do not set `reset_printer` on ordinary label jobs — it discards any darkness or speed the
-lab tuned on the front panel and adds a media feed to every print. A reset that the
-printer rejects is logged and the label still prints.
+### Origin allowlist
+
+Since **v2.1.0** the routes that print or change settings (`/print`, `/print-batch`,
+`POST /config`) reject a request whose `Origin` header is set and is not
+in the service's `allowed_origins` config, with `403`. Requests carrying no `Origin` (curl,
+the manager tray, installer smoke tests) are unaffected.
+
+The default list already covers the production, staging and local-dev origins of the
+ReLIMS front ends, so existing integrations need no change. **A front end served from a
+new host must be added**, or printing from it fails with `403` — the browser sends the
+SPA's own origin on a `fetch` to `localhost:5577`. Add it to `allowed_origins` in the
+workstation's `config.json`; the list is deliberately not writable over HTTP, since a
+route that could rewrite the allowlist would guard nothing.
+
+Note the agent must stay addressed as `localhost` / `127.0.0.1`. An https page is blocked
+from fetching a plaintext http origin except for loopback, which browsers treat as
+potentially trustworthy — a LAN address like `http://10.0.0.5:5577` would not qualify.
+
+### `config` — print with settings that are not saved
+
+Accepts the same keys as `POST /config` apart from `api_port`, and overrides them for one
+job: the backend and printer the job is sent to, the calibration origin and fine-tune
+offsets, and the darkness. Unknown keys are ignored and unparsable numbers dropped, so a
+partial object is safe — anything absent falls back to the saved value.
+
+```json
+{ "zpl": "^XA…^XZ", "config": { "backend": "network", "printer_host": "10.0.0.9",
+                                "printer_port": 9100, "label_darkness": 25 } }
+```
+
+This exists for **settings pages**: it is what lets the built-in Test Print button print
+through the values currently on screen so they can be judged before being kept. Saving
+remains the sole job of `POST /config`. `POST /print-batch` does not accept it — batches
+come from apps, which have no unsaved form behind them, and always use the saved config.
+
+Ordinary label printing should omit `config` entirely and let each workstation's saved
+settings apply. Sending one from an app would override the tuning the lab did locally.
+
+### The printer is handed back after every job
+
+ZPL's positioning, width and darkness commands are **modal** — they update the printer's
+*active configuration* and stay in effect for every later format until changed again or
+the printer is powered off. Since **v2.1.0** every job therefore ends with a small
+configuration-only format (no field data, so no media is used) that restores the printer,
+controlled by the `printer_restore_mode` setting:
+
+| Mode | Sends | Notes |
+| --- | --- | --- |
+| `"jur"` *(default)* | `^XA^LH0,0^MD0^CI0^JUR^XZ` | Power-on values, then a recall of the printer's saved configuration, which also undoes the `^PW`/`^LL` your renderer emits. The values in front still apply on a printer that ignores `^JUR`. |
+| `"neutralize"` | `^XA^LH0,0^MD0^CI0^XZ` | Puts back the power-on values, for printers whose ZPL emulation lacks `^JU`. Cannot restore `^PW`/`^LL`, whose power-on values depend on the printer. |
+| `"off"` | nothing | Pre-2.1.0 behaviour. |
+
+It is sent once, after the last copy, inside the same connection or spooler document as
+the label — so nothing can interleave a job between a label and its restore. **Callers do
+not control this**: it is a per-workstation setting, because whether a printer is shared
+with other software is a property of the machine, not of the job.
+
+**Nothing persistent ever reaches the printer.** `^JUS`, `^JUF`, `^JUN`, `^JUA`, `~JC`,
+`~JL`, `~JR`, `~SD`/`^SD` and the prefix changes `^CC`/`~CC`/`^CT`/`~CT` are stripped from
+every outgoing job, `raw` ones included. A job containing a Citizen configuration block
+(`~!!`) is refused with `400`. Neither restore mode writes to non-volatile memory, so a
+power cycle always returns the printer to its own saved setup.
+
+If a job fails, the service sends the restore again on its own, and it sends one when it
+starts. `/health` includes `restore_mode`.
 
 **Darkness is handled by the service, not the caller.** Each workstation's
 `label_darkness` config (`-30`…`30`, set on the settings page) is injected as `^MD` into
 every non-`raw` label. Do not emit your own `^MD` — the service strips it before adding
-its own, because Zebra treats multiple `^MD` commands in one format as cumulative. Unlike
-`reset_printer`, this setting survives a printer reset, so it is the right place to fix
-labels that print too faint. Note it is label-global (barcodes darken along with text) and
+its own, because Zebra treats multiple `^MD` commands in one format as cumulative. It is
+the right place to fix labels that print too faint. Note it is label-global (barcodes darken along with text) and
 applies to ZPL only — image payloads are rasterized by the OS driver, which the service
 does not control.
 
