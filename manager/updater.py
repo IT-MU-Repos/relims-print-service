@@ -14,7 +14,7 @@ from packaging.version import Version
 
 from paths import (
     get_install_dir, get_staging_dir, get_service_binary_path,
-    get_self_updater_path, get_service_url,
+    get_self_updater_path, get_service_url, get_manager_state_path,
 )
 from version import VERSION as MANAGER_VERSION
 
@@ -22,6 +22,69 @@ GITHUB_OWNER = "IT-MU-Repos"
 GITHUB_REPO = "relims-print-service"
 API_URL = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
 CHECK_INTERVAL_SECONDS = 3600  # 1 hour
+
+# How long a freshly installed service gets to answer /status with the new
+# version before the update is rolled back. Startup includes PyInstaller
+# unpacking the onefile binary, which is slow on a busy lab PC.
+SERVICE_HEALTH_TIMEOUT_SECONDS = 30
+
+
+def _is_newer(remote: str, current: str) -> bool:
+    try:
+        return Version(remote) > Version(current)
+    except Exception:
+        return remote != current
+
+
+def _extract_binary(archive: Path, wanted: str, dest_dir: Path, out_name: str) -> None:
+    """Extract the file named `wanted` from a release tarball as `out_name`.
+
+    Chosen by name, not position: the service archive also carries
+    setup-print-service.sh, and "the first file" is only the binary for as
+    long as the archive happens to list it first.
+    """
+    with tarfile.open(str(archive)) as tf:
+        files = [m for m in tf.getmembers() if m.isfile()]
+        member = next((m for m in files if Path(m.name).name == wanted), None)
+        if member is None:
+            raise FileNotFoundError(f"{wanted} not found in {archive.name}")
+        member.name = out_name
+        # "data" refuses absolute paths, links out of dest_dir and device
+        # files; it exists from Python 3.11.4 (CI builds on the latest 3.11).
+        safe = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
+        tf.extract(member, path=dest_dir, **safe)
+
+
+def load_state() -> dict:
+    try:
+        return json.loads(get_manager_state_path().read_text())
+    except Exception:
+        return {}
+
+
+def save_state(state: dict) -> None:
+    try:
+        get_manager_state_path().write_text(json.dumps(state, indent=2))
+    except OSError:
+        pass
+
+
+def failed_version(component: str) -> str | None:
+    """The last version of `component` whose update was rolled back."""
+    return load_state().get("failed_versions", {}).get(component)
+
+
+def record_failed_version(component: str, version: str) -> None:
+    """Remember a release that failed, so automatic updates stop retrying it.
+
+    Without this, a broken release is re-applied every hour: each attempt
+    stops the service and costs the lab a few seconds of failed prints. A
+    later release clears it by being a different version; "Update" in the
+    tray menu still tries it on request.
+    """
+    state = load_state()
+    state.setdefault("failed_versions", {})[component] = version
+    save_state(state)
 
 
 class UpdateChecker:
@@ -49,13 +112,15 @@ class UpdateChecker:
         if not tag:
             return None
 
-        # Check if this is actually newer
-        try:
-            if Version(tag) <= Version(MANAGER_VERSION):
-                return None
-        except Exception:
-            if tag == MANAGER_VERSION:
-                return None
+        # Newer than EITHER component. Comparing against the manager alone
+        # stranded a service that was left behind — by a failed or rolled-back
+        # service update, say — once the manager itself was current. An
+        # unreachable service ("unknown") does not count as behind on its own:
+        # it may simply be stopped, and that is not something to update over.
+        current_service = self._get_service_version()
+        service_behind = current_service != "unknown" and _is_newer(tag, current_service)
+        if not (_is_newer(tag, MANAGER_VERSION) or service_behind):
+            return None
 
         self.latest_release = release
         self.latest_version = tag
@@ -63,7 +128,6 @@ class UpdateChecker:
         # Fetch manifest.json from release assets
         self.manifest = self._fetch_manifest(release)
 
-        current_service = self._get_service_version()
         return {
             "version": tag,
             "current_manager": MANAGER_VERSION,
@@ -168,8 +232,23 @@ class UpdateChecker:
 
     # --- Applying updates ---
 
+    def _wait_for_service_version(self, expected: str) -> bool:
+        """Poll /status until the service reports `expected`, or time out."""
+        deadline = time.monotonic() + SERVICE_HEALTH_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            if self._get_service_version() == expected:
+                return True
+            time.sleep(1)
+        return False
+
     def apply_service_update(self) -> bool:
-        """Stop the service, replace its binary, and restart it.
+        """Stop the service, replace its binary, restart it, and check it.
+
+        The previous binary is kept until the new one has answered /status
+        with the new version. If it does not — it crashes on start, or a
+        dependency is missing from the build — the previous binary goes back
+        and is restarted, so a bad release costs a lab PC seconds of printing
+        rather than all of it.
 
         Returns True on success, False on failure (with rollback).
         """
@@ -195,14 +274,7 @@ class UpdateChecker:
 
             # Apply update
             if staged.name.endswith(".tar.gz"):
-                with tarfile.open(str(staged)) as tf:
-                    # Extract the single binary from the archive
-                    members = tf.getmembers()
-                    for member in members:
-                        if member.isfile():
-                            member.name = target.name
-                            tf.extract(member, path=target.parent)
-                            break
+                _extract_binary(staged, "relims-print-service", target.parent, target.name)
             else:
                 shutil.copy2(str(staged), str(target))
 
@@ -210,28 +282,38 @@ class UpdateChecker:
             if platform.system() != "Windows":
                 os.chmod(str(target), 0o755)
 
-            # Clean up
-            if backup.exists():
-                backup.unlink()
-            staged.unlink(missing_ok=True)
-
         except Exception:
-            # Rollback
-            if backup.exists():
-                if target.exists():
-                    target.unlink(missing_ok=True)
-                shutil.move(str(backup), str(target))
-            start_service()
+            self._restore_service_backup(target, backup, start_service)
             return False
 
         start_service()
+        expected = (self.manifest or {}).get("service_version", self.latest_version)
+        if expected and not self._wait_for_service_version(expected):
+            stop_service()
+            time.sleep(1)
+            self._restore_service_backup(target, backup, start_service)
+            return False
+
+        # Verified — only now is the old binary disposable.
+        backup.unlink(missing_ok=True)
+        staged.unlink(missing_ok=True)
         return True
+
+    @staticmethod
+    def _restore_service_backup(target, backup, start_service):
+        """Put the previous service binary back and start it."""
+        if backup.exists():
+            if target.exists():
+                target.unlink(missing_ok=True)
+            shutil.move(str(backup), str(target))
+        start_service()
 
     def apply_manager_update(self) -> bool:
         """Self-update the manager by spawning the external updater helper.
 
         The updater waits for this process to exit, replaces the binary,
-        and relaunches the manager. This method does NOT return -- it exits.
+        and relaunches the manager. On success this does NOT return -- the
+        whole process exits.
         """
         staged = self._downloaded_assets.get("manager")
         if not staged or not staged.exists():
@@ -241,13 +323,8 @@ class UpdateChecker:
         if staged.name.endswith(".tar.gz"):
             extracted = get_staging_dir() / "relims-print-manager"
             try:
-                with tarfile.open(str(staged)) as tf:
-                    members = tf.getmembers()
-                    for member in members:
-                        if member.isfile():
-                            member.name = "relims-print-manager"
-                            tf.extract(member, path=get_staging_dir())
-                            break
+                _extract_binary(staged, "relims-print-manager", get_staging_dir(),
+                                "relims-print-manager")
                 staged.unlink(missing_ok=True)
                 staged = extracted
                 os.chmod(str(staged), 0o755)
@@ -281,5 +358,8 @@ class UpdateChecker:
         except Exception:
             return False
 
-        # Exit so the updater can replace our binary
-        sys.exit(0)
+        # Exit so the updater can replace our binary. os._exit, not sys.exit:
+        # this runs on a background thread, where sys.exit only ends the
+        # thread and leaves the old manager running while its binary is
+        # replaced underneath it.
+        os._exit(0)

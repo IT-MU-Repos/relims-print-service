@@ -7,7 +7,7 @@ import pystray
 from PIL import Image, ImageDraw
 
 from version import VERSION
-from updater import UpdateChecker
+from updater import UpdateChecker, failed_version, record_failed_version
 from paths import get_service_url
 
 if sys.platform == "win32":
@@ -28,6 +28,9 @@ class ManagerTray:
         self.update_info = None
         self.icon = None
         self._check_timer = None
+        # One update at a time: the hourly check and a menu click must never
+        # stop and replace the service concurrently.
+        self._update_lock = threading.Lock()
 
     # --- Icon rendering ---
 
@@ -104,7 +107,12 @@ class ManagerTray:
         self._check_timer.start()
 
     def _check_updates_background(self):
-        """Run update check in a background thread."""
+        """Check for an update in a background thread, and install it.
+
+        Installing used to need someone to click Update in the tray menu, so
+        lab PCs sat on old versions indefinitely. Updates now install on their
+        own; the menu entries remain for installing on demand.
+        """
         def _check():
             info = self.checker.check_for_update()
             if info:
@@ -112,8 +120,43 @@ class ManagerTray:
                 if self.icon:
                     self.icon.icon = self._create_icon(has_update=True)
                     self._refresh_menu()
+                self._install_update(info, automatic=True)
         t = threading.Thread(target=_check, daemon=True)
         t.start()
+
+    def _install_update(self, info, automatic):
+        """Install whatever `info` says is behind: the service, then the manager.
+
+        The service goes first and is health-checked (see
+        UpdateChecker.apply_service_update). A release whose service had to be
+        rolled back is not trusted for the manager either, and automatic
+        updates skip it from then on — see updater.record_failed_version.
+        """
+        if not self._update_lock.acquire(blocking=False):
+            return  # an update is already running
+        try:
+            version = info["version"]
+            if info.get("needs_service_update"):
+                if automatic and failed_version("service") == version:
+                    return
+                if not self.checker.download_update("service"):
+                    return
+                if not self.checker.apply_service_update():
+                    record_failed_version("service", version)
+                    return
+            if info.get("needs_manager_update"):
+                if not self.checker.download_update("manager"):
+                    return
+                # Hands over to the self-updater and ends this process; returns
+                # only if it could not, leaving this manager running as it was.
+                self.checker.apply_manager_update()
+                return
+            self.update_info = None
+            if self.icon:
+                self.icon.icon = self._create_icon(has_update=False)
+                self._refresh_menu()
+        finally:
+            self._update_lock.release()
 
     # --- Menu actions ---
 
@@ -134,39 +177,18 @@ class ManagerTray:
 
     def _on_update_service(self, icon, item):
         """Download and apply a service-only update."""
-        def _do_update():
-            path = self.checker.download_update("service")
-            if path:
-                success = self.checker.apply_service_update()
-                if success:
-                    self.update_info = None
-                    if self.icon:
-                        self.icon.icon = self._create_icon(has_update=False)
-                    self._refresh_menu()
-        t = threading.Thread(target=_do_update, daemon=True)
-        t.start()
+        if not self.update_info:
+            return
+        info = dict(self.update_info, needs_service_update=True, needs_manager_update=False)
+        threading.Thread(target=self._install_update, args=(info, False), daemon=True).start()
 
     def _on_update_all(self, icon, item):
         """Download and apply updates to both service and manager."""
-        def _do_update():
-            # Update service first
-            if self.update_info.get("needs_service_update"):
-                if not self.checker.download_update("service"):
-                    return  # Download failed
-                self.checker.apply_service_update()
-            # Then self-update manager
-            if self.update_info.get("needs_manager_update"):
-                if not self.checker.download_update("manager"):
-                    return  # Download failed
-                self.checker.apply_manager_update()
-            else:
-                # Only service needed updating, clear badge
-                self.update_info = None
-                if self.icon:
-                    self.icon.icon = self._create_icon(has_update=False)
-                self._refresh_menu()
-        t = threading.Thread(target=_do_update, daemon=True)
-        t.start()
+        if not self.update_info:
+            return
+        threading.Thread(
+            target=self._install_update, args=(self.update_info, False), daemon=True
+        ).start()
 
     def _on_configure(self, icon, item):
         webbrowser.open(get_service_url("/"))

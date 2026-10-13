@@ -99,9 +99,33 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
+  test:
+    name: Tests
+    needs: version
+    if: needs.version.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt packaging
+
+      # Every installed agent updates itself from the release this workflow
+      # publishes, so nothing is built until the suite passes.
+      - name: Run tests
+        run: python -m pytest -q
+
   build-windows:
     name: Build Windows binaries
-    needs: version
+    needs: [version, test]
     if: needs.version.outputs.should_release == 'true'
     runs-on: windows-latest
 
@@ -139,6 +163,30 @@ jobs:
 
       - name: Build service exe
         run: pyinstaller build/build_service.spec
+
+      # Start the frozen exe and ask it its version. Catches a module the
+      # build left out (service/zpl.py is imported, not listed anywhere), which
+      # unit tests run from source cannot see — and which, shipped, would leave
+      # every lab PC that auto-updates without a print service.
+      - name: Smoke-test service exe
+        shell: pwsh
+        run: |
+          $env:APPDATA = Join-Path $env:RUNNER_TEMP "smoke-appdata"
+          $cfgDir = Join-Path $env:APPDATA "ReLIMS Print Service"
+          New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
+          '{"api_port": 5599}' | Set-Content -Encoding ascii (Join-Path $cfgDir "config.json")
+          $proc = Start-Process -FilePath "dist\relims-print-service.exe" -PassThru
+          $status = $null
+          for ($i = 0; $i -lt 60 -and -not $status; $i++) {
+            try { $status = Invoke-RestMethod -TimeoutSec 2 "http://127.0.0.1:5599/status" } catch { Start-Sleep 1 }
+          }
+          Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          Get-Process relims-print-service -ErrorAction SilentlyContinue | Stop-Process -Force
+          if (-not $status) { throw "The built service never answered /status" }
+          if ($status.version -ne "${{ steps.version.outputs.version }}") {
+            throw "The built service reports $($status.version), expected ${{ steps.version.outputs.version }}"
+          }
+          Write-Host "Service exe OK: $($status | ConvertTo-Json -Compress)"
 
       - name: Build manager exe
         run: pyinstaller build/build_manager.spec
@@ -189,7 +237,7 @@ jobs:
 
   build-linux:
     name: Build Linux binaries
-    needs: version
+    needs: [version, test]
     if: needs.version.outputs.should_release == 'true'
     runs-on: ubuntu-latest
 
@@ -234,6 +282,27 @@ jobs:
       - name: Build service binary
         run: pyinstaller build/build_service_linux.spec
 
+      # Same check as the Windows job: start the frozen binary, ask its version.
+      - name: Smoke-test service binary
+        run: |
+          export HOME="$(mktemp -d)"
+          mkdir -p "$HOME/.config/ReLIMS Print Service"
+          echo '{"api_port": 5599}' > "$HOME/.config/ReLIMS Print Service/config.json"
+          ./dist/relims-print-service &
+          pid=$!
+          for i in $(seq 1 60); do
+            if curl -fsS --max-time 2 http://127.0.0.1:5599/status > status.json; then break; fi
+            sleep 1
+          done
+          kill "$pid" 2>/dev/null || true
+          test -s status.json || { echo "The built service never answered /status"; exit 1; }
+          python3 - "${{ steps.version.outputs.version }}" <<'PY'
+          import json, sys
+          got = json.load(open("status.json"))["version"]
+          sys.exit(0 if got == sys.argv[1] else f"The built service reports {got}, expected {sys.argv[1]}")
+          PY
+          echo "Service binary OK: $(cat status.json)"
+
       - name: Build manager binary
         run: pyinstaller build/build_manager_linux.spec
 
@@ -247,7 +316,11 @@ jobs:
           cp setup-print-service.sh packaging/relims-print-service/setup-print-service.sh
           chmod +x packaging/relims-print-service/relims-print-service
           chmod +x packaging/relims-print-service/setup-print-service.sh
-          tar czf dist/relims-print-service-linux.tar.gz -C packaging relims-print-service
+          # Files listed explicitly, binary FIRST: managers up to v2.0.16
+          # install the first file in the archive as the service binary.
+          tar czf dist/relims-print-service-linux.tar.gz -C packaging \
+            relims-print-service/relims-print-service \
+            relims-print-service/setup-print-service.sh
           cd dist
           tar czf relims-print-manager-linux.tar.gz relims-print-manager
 

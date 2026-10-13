@@ -150,14 +150,28 @@ labels are already off:
 
 ## Updates
 
-The manager automatically checks for updates every hour by polling the GitHub Releases API.
+The manager checks the GitHub Releases API at start-up and then every hour. Since **v2.1.0**
+it installs what it finds on its own: the print service first, then the manager itself. The
+tray menu's **Update Print Service Only** / **Update Everything** still install on demand.
 
-When an update is available:
-1. An orange badge appears on the tray icon
-2. Right-click the tray icon to see the update menu
-3. Choose **Update Print Service Only** (updates just the printing backend) or **Update Everything** (updates both service and manager)
+Managers **up to v2.0.16 only show an orange badge** and never install by themselves. Each of
+those PCs needs **Update Everything** clicked once; from then on, updates are automatic.
 
-Service-only updates apply instantly (the service restarts in seconds). Full updates briefly restart the manager too.
+Safeguards:
+
+- **A new service must prove itself.** After the swap the manager waits up to 30 s for
+  `/status` to report the new version. If it does not, the previous binary goes back and is
+  restarted.
+- **A failed release is not retried every hour.** Its version is recorded in
+  `manager_state.json` (next to `config.json`) and skipped by automatic updates until a newer
+  release appears. The tray menu can still install it on request.
+- **The manager is not updated from a release whose service failed.**
+- **One update at a time.** The hourly check and a menu click cannot overlap.
+- **An update is offered when either component is behind**, not only the manager.
+- **Linux archives are unpacked by file name**, not by position, and with tar's `data` filter.
+- **CI publishes nothing that fails.** The test suite runs first, and each built service
+  binary is started and must answer `/status` with the new version before the release is
+  created.
 
 ## API Endpoints
 

@@ -130,6 +130,7 @@ class TestRealFrontendOriginsKeepWorking:
         "https://labserve.net",
         "https://www.labserve.net",
         "https://www.it-mu.co.za",
+        "https://eacl.it-mu.co.za",
         "https://staging.labserve.net",
         "https://staging.it-mu.co.za",
         "https://test.labserve.net",

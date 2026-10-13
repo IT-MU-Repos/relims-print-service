@@ -26,6 +26,8 @@ DEFAULT_ALLOWED_ORIGINS = [
     "https://www.labserve.net",
     "https://www.it-mu.co.za",
     "https://apps.it-mu.co.za",
+    # EACL tenant (Mule) — its own host on the cluster.
+    "https://eacl.it-mu.co.za",
     # Staging / test.
     "https://staging.labserve.net",
     "https://staging.it-mu.co.za",
